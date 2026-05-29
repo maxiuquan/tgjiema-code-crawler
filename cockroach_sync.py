@@ -37,7 +37,7 @@ class CockroachSync:
             await self._pool.close()
 
     async def sync_codes(self, limit: int = 500) -> int:
-        if not self._pool:
+        if not self._pool or getattr(self._pool, '_closed', False):
             ok = await self.connect()
             if not ok:
                 return 0

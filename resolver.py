@@ -356,8 +356,6 @@ class CodeResolver:
         resolved_count = 0
 
         for code_row in codes:
-            if not self._running:
-                break
             ok = await self._resolve_one(code_row, storage_channel, db_ok)
             if ok:
                 resolved_count += 1
@@ -664,7 +662,7 @@ class CodeResolver:
         storage_ids: List[int],
         media_meta: List[dict],
     ):
-        if not self._db_pool:
+        if not self._db_pool or getattr(self._db_pool, "_closed", False):
             return
 
         lock = self._cache_locks.setdefault(code, asyncio.Lock())
