@@ -126,43 +126,65 @@ async def cmd_daemon(args):
     _crawler_instance = crawler
     _resolver_instance = resolver
 
+    running = True
+
     def _signal_handler():
+        nonlocal running
         logger.info("收到停止信号，正在停止所有任务...")
+        running = False
         crawler.stop()
         resolver.stop()
 
     _setup_signal_handlers(_signal_handler)
-    logger.info("[Daemon] 启动全自动模式: 爬取 与 解析 并行运行")
+    logger.info("[Daemon] 启动全自动模式: 爬取 → 解析 → 同步 交替循环")
 
-    async def crawl_loop():
-        await crawler.continuous_crawl()
+    cycle = 0
+    while running:
+        cycle += 1
+        logger.info(f"[Daemon] === 第 {cycle} 轮开始 ===")
 
-    async def resolve_loop():
-        await resolver.continuous_resolve()
+        # 1. 爬取（如果需要爬新码）
+        if settings.DAEMON_CRAWL_FIRST:
+            logger.info("[Daemon] 阶段1: 爬取频道发现文件码...")
+            try:
+                stats = await crawler.discover_and_crawl()
+                logger.info(f"[Daemon] 爬取完成: 发现 {stats['codes_found']} 个新码")
+            except Exception as e:
+                logger.error(f"[Daemon] 爬取阶段失败: {e}")
 
-    async def sync_loop():
-        if not settings.COCKROACHDB_URL:
-            return
-        while crawler._running or resolver._running:
-            await asyncio.sleep(settings.DAEMON_CYCLE_INTERVAL)
-            if not crawler._running and not resolver._running:
-                break
+        # 2. 解析待处理文件码（每次解析直到队列空或等待间隔到）
+        logger.info("[Daemon] 阶段2: 解析待处理文件码...")
+        try:
+            resolved = await resolver.resolve_next_batch(batch_size=args.resolve_batch)
+            logger.info(f"[Daemon] 解析完成: 成功 {resolved} 个")
+        except Exception as e:
+            logger.error(f"[Daemon] 解析阶段失败: {e}")
+
+        # 3. 同步到 CockroachDB
+        if settings.COCKROACHDB_URL:
+            logger.info("[Daemon] 阶段3: 同步到 CockroachDB...")
             try:
                 synced = await syncer.sync_all(batch_size=1000)
                 logger.info(f"[Daemon] 同步完成: {synced} 个")
             except Exception as e:
                 logger.error(f"[Daemon] 同步阶段失败: {e}")
 
-    tasks = [
-        asyncio.create_task(crawl_loop()),
-        asyncio.create_task(resolve_loop()),
-        asyncio.create_task(sync_loop()),
-    ]
+        overall = storage.get_crawl_stats()
+        resolve_st = storage.get_resolve_stats()
+        logger.info(
+            f"[Daemon] === 第 {cycle} 轮完成 === "
+            f"总计: 频道 {overall['channels']}, "
+            f"码 {overall['codes']} (已解析 {overall['resolved']}/{overall['unresolved']} 待解析), "
+            f"解析历史: {resolve_st['done']} 成功 / {resolve_st['failed']} 失败"
+        )
 
-    try:
-        await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
-        pass
+        # 缩短等待间隔
+        if running and args.interval > 0:
+            logger.info(f"[Daemon] 等待 {args.interval} 秒后开始下一轮...")
+            for _ in range(args.interval):
+                if not running:
+                    break
+                await asyncio.sleep(1)
 
     await resolver.close()
     await syncer.close()
