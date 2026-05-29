@@ -29,7 +29,6 @@ class Settings:
 
     CRAWL_INTERVAL_MINUTES: int = 30
     CRAWL_MESSAGE_LIMIT_PER_CHANNEL: int = 200
-    SEARCH_LIMIT: int = 50
 
     COCKROACHDB_URL: str = ""
 
@@ -38,19 +37,12 @@ class Settings:
 
     LOG_LEVEL: str = "INFO"
 
-    SEARCH_KEYWORDS: List[str] = [
-        "文件码", "file code", "解码", "文件分享",
-        "资源共享", "网盘", "bot",
-    ]
-
     TARGET_FILE_EXTENSIONS: List[str] = [
         "zip", "rar", "7z", "tar", "gz",
         "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
         "jpg", "jpeg", "png", "gif", "mp4", "mkv", "avi",
         "mp3", "flac", "wav", "apk", "iso", "exe",
     ]
-
-    SKIP_JOINED_CHANNELS: bool = False
 
     MAX_CONCURRENT_CRAWLS: int = 3
 
@@ -73,7 +65,6 @@ class Settings:
         obj.TELEGRAM_PHONE = os.getenv("TELEGRAM_PHONE", "")
         obj.CRAWL_INTERVAL_MINUTES = int(os.getenv("CRAWL_INTERVAL_MINUTES", "30"))
         obj.CRAWL_MESSAGE_LIMIT_PER_CHANNEL = int(os.getenv("CRAWL_MESSAGE_LIMIT_PER_CHANNEL", "200"))
-        obj.SEARCH_LIMIT = int(os.getenv("SEARCH_LIMIT", "50"))
         obj.COCKROACHDB_URL = os.getenv("COCKROACHDB_URL", "")
         obj.SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "codes.db")
         obj.EXPORT_DIR = os.getenv("EXPORT_DIR", "exports")
@@ -86,9 +77,6 @@ class Settings:
         obj.RESOLVE_DELAY_BETWEEN_CODES = float(os.getenv("RESOLVE_DELAY_BETWEEN_CODES", "3.0"))
         obj.DAEMON_CRAWL_FIRST = os.getenv("DAEMON_CRAWL_FIRST", "true").lower() == "true"
         obj.DAEMON_CYCLE_INTERVAL = int(os.getenv("DAEMON_CYCLE_INTERVAL", "60"))
-        keywords_str = os.getenv("SEARCH_KEYWORDS", "")
-        if keywords_str:
-            obj.SEARCH_KEYWORDS = [k.strip() for k in keywords_str.split(",") if k.strip()]
         return obj
 
 

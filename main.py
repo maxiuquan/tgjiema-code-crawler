@@ -76,7 +76,7 @@ async def cmd_crawl(args):
             _setup_signal_handlers(_signal_handler)
             await crawler.continuous_crawl()
         else:
-            stats = await crawler.discover_and_crawl()
+            stats = await crawler.crawl_joined_channels()
             logger.info(f"爬取完成: {stats}")
             unresolved = storage.get_unresolved_count()
             if unresolved:
@@ -136,23 +136,23 @@ async def cmd_daemon(args):
         resolver.stop()
 
     _setup_signal_handlers(_signal_handler)
-    logger.info("[Daemon] 启动全自动模式: 爬取 → 解析 → 同步 交替循环")
+    logger.info("[Daemon] 启动全自动模式: 爬取已加入频道 → 解析 → 同步 交替循环")
 
     cycle = 0
     while running:
         cycle += 1
         logger.info(f"[Daemon] === 第 {cycle} 轮开始 ===")
 
-        # 1. 爬取（如果需要爬新码）
+        # 1. 爬取已加入的频道
         if settings.DAEMON_CRAWL_FIRST:
-            logger.info("[Daemon] 阶段1: 爬取频道发现文件码...")
+            logger.info("[Daemon] 阶段1: 爬取已加入的频道发现文件码...")
             try:
-                stats = await crawler.discover_and_crawl()
+                stats = await crawler.crawl_joined_channels()
                 logger.info(f"[Daemon] 爬取完成: 发现 {stats['codes_found']} 个新码")
             except Exception as e:
                 logger.error(f"[Daemon] 爬取阶段失败: {e}")
 
-        # 2. 解析待处理文件码（每次解析直到队列空或等待间隔到）
+        # 2. 解析待处理文件码
         logger.info("[Daemon] 阶段2: 解析待处理文件码...")
         try:
             resolved = await resolver.resolve_next_batch(batch_size=args.resolve_batch)
@@ -178,7 +178,6 @@ async def cmd_daemon(args):
             f"解析历史: {resolve_st['done']} 成功 / {resolve_st['failed']} 失败"
         )
 
-        # 缩短等待间隔
         if running and args.interval > 0:
             logger.info(f"[Daemon] 等待 {args.interval} 秒后开始下一轮...")
             for _ in range(args.interval):
