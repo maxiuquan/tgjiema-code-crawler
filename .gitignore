@@ -23,6 +23,9 @@ env/
 # Environment files (contain secrets)
 .env
 
+# Local data storage
+*.db
+
 # OS
 .DS_Store
 Thumbs.db
