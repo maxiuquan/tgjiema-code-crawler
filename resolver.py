@@ -489,11 +489,12 @@ class CodeResolver:
                 continue
 
             try:
-                copied = await self.client.copy_message(
-                    to_peer=storage_channel,
+                forwarded = await self.client.forward_messages(
+                    storage_channel,
+                    messages=msg.id,
                     from_peer=msg.chat_id if msg.chat_id else entity,
-                    message_id=msg.id,
                 )
+                copied = forwarded[0]
                 storage_msg_id = copied.id
                 all_storage_ids.append(storage_msg_id)
 

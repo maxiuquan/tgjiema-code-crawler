@@ -11,6 +11,7 @@ from telethon.errors import (
     UsernameNotOccupiedError, InviteHashExpiredError, InviteRequestSentError,
 )
 from telethon.tl.functions.channels import JoinChannelRequest
+from telethon.tl.functions.contacts import SearchRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.types import (
     Channel, Chat, Document, Message, MessageMediaDocument, MessageMediaPhoto, Photo,
@@ -63,19 +64,19 @@ class CodeCrawler:
                             })
 
                 try:
-                    search_results = await self.client.search(
-                        q=keyword, broadcast=True, limit=settings.SEARCH_LIMIT
+                    search_result = await self.client(
+                        SearchRequest(q=keyword, limit=settings.SEARCH_LIMIT)
                     )
-                    for result in search_results:
-                        if isinstance(result.chat, (Channel, Chat)):
-                            cid = result.chat.id
+                    for chat in search_result.chats:
+                        if isinstance(chat, (Channel, Chat)):
+                            cid = chat.id
                             if cid not in [c["channel_id"] for c in found]:
                                 found.append({
                                     "channel_id": cid,
-                                    "username": getattr(result.chat, "username", "") or "",
-                                    "title": getattr(result.chat, "title", ""),
-                                    "type": "channel" if isinstance(result.chat, Channel) else "group",
-                                    "members": getattr(result.chat, "participants_count", 0),
+                                    "username": getattr(chat, "username", "") or "",
+                                    "title": getattr(chat, "title", ""),
+                                    "type": "channel" if isinstance(chat, Channel) else "group",
+                                    "members": getattr(chat, "participants_count", 0),
                                 })
                 except Exception as e:
                     logger.warning(f"[Discover] contacts.Search 失败: {e}")
