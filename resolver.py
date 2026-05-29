@@ -432,7 +432,6 @@ class CodeResolver:
         all_responses: List[Message] = []
         deadline = time.time() + settings.RESOLVE_TIMEOUT_SECONDS
         seen_ids = set()
-        bot_id = getattr(bot_entity, "id", None)
 
         while time.time() < deadline:
             try:
@@ -448,17 +447,6 @@ class CodeResolver:
 
                     if msg.out:
                         continue
-                    if msg.sender_id and msg.sender_id == bot_id:
-                        continue
-
-                    if msg.sender_id:
-                        try:
-                            sender = await msg.get_sender()
-                            if sender:
-                                if not getattr(sender, "bot", False):
-                                    continue
-                        except Exception:
-                            pass
 
                     if msg.media and not isinstance(msg.media, MessageMediaWebPage):
                         all_responses.append(msg)
@@ -492,8 +480,6 @@ class CodeResolver:
                 if msg.id in final_ids:
                     continue
                 if msg.out:
-                    continue
-                if msg.sender_id and msg.sender_id == bot_id:
                     continue
                 if msg.media and not isinstance(msg.media, MessageMediaWebPage):
                     final_msgs.append(msg)
