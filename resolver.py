@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
@@ -148,6 +149,17 @@ class CodeResolver:
                     f"msg_id={msg.id}"
                 )
                 self._restart_settle(exchange, bot_username)
+                return
+
+            text = getattr(msg, "message", None) or ""
+            if text:
+                exchange.setdefault("text_responses", []).append(
+                    {"msg_id": msg.id, "text": text}
+                )
+                logger.debug(
+                    f"[Resolver] 外部机器人 @{bot_username} 文本响应: "
+                    f"{text[:80]}{'...' if len(text) > 80 else ''}"
+                )
 
         @self.client.on(events.MessageEdited(incoming=True))
         async def on_message_edited(event):
@@ -553,6 +565,53 @@ class CodeResolver:
         exchange["_collection_done"] = True
         exchange["_collect_event"].set()
 
+    # ─── 限速检测 ──────────────────────────────────────────
+
+    _RATE_LIMIT_PATTERNS = [
+        (re.compile(r"(?:请|等待?|需\s*要?)\s*(\d+)\s*秒"), 1),
+        (re.compile(r"(\d+)\s*秒\s*(?:后|再|之?后)"), 1),
+        (re.compile(r"wait\s+(\d+)\s*sec(?:ond)?s?", re.IGNORECASE), 1),
+        (re.compile(r"try\s+again\s+(?:in|after)\s+(\d+)\s*sec(?:ond)?s?", re.IGNORECASE), 1),
+        (re.compile(r"(\d+)\s*sec(?:ond)?s?\s*(?:later|after)", re.IGNORECASE), 1),
+        (re.compile(r"(?:频率|操作)\s*(?:过快|频繁|过于频繁)"), None),
+        (re.compile(r"too\s+(?:fast|frequent|many\s+requests)", re.IGNORECASE), None),
+        (re.compile(r"(?:请稍[候后]|稍[候后]再试|请勿频繁)"), None),
+        (re.compile(r"flood\s*wait", re.IGNORECASE), None),
+    ]
+
+    _DEFAULT_RATE_LIMIT_WAIT = 5
+
+    def _check_rate_limit(self, exchange: dict) -> float:
+        text_responses = exchange.get("text_responses", [])
+        if not text_responses:
+            return 0
+
+        # 只看最近的文本响应
+        recent = text_responses[-5:]
+        for entry in recent:
+            text = entry.get("text", "")
+            if not text:
+                continue
+            for pattern, group_idx in self._RATE_LIMIT_PATTERNS:
+                m = pattern.search(text)
+                if m:
+                    if group_idx is not None:
+                        try:
+                            seconds = int(m.group(group_idx))
+                        except (IndexError, ValueError):
+                            seconds = self._DEFAULT_RATE_LIMIT_WAIT
+                    else:
+                        seconds = self._DEFAULT_RATE_LIMIT_WAIT
+
+                    wait_time = min(max(seconds, 1), 60)
+                    logger.info(
+                        f"[Resolver] 检测到翻页限速: \"{text[:60]}\", "
+                        f"等待 {wait_time}s"
+                    )
+                    return wait_time
+
+        return 0
+
     # ─── 翻页循环 ──
 
     async def _pagination_loop(self, bot_username: str):
@@ -569,6 +628,12 @@ class CodeResolver:
 
             row, col = btn_pos
 
+            rate_wait = self._check_rate_limit(exchange)
+            if rate_wait > 0:
+                logger.info(f"[Resolver] @{bot_username} 翻页限速等待 {rate_wait}s")
+                exchange.pop("text_responses", None)
+                await asyncio.sleep(rate_wait)
+
             media_before = len(exchange.get("media_events", []))
             exchange["_collection_done"] = False
             new_event = asyncio.Event()
@@ -582,7 +647,6 @@ class CodeResolver:
             if not clicked:
                 break
 
-            # 等待响应或超时
             try:
                 await asyncio.wait_for(new_event.wait(), timeout=15)
             except asyncio.TimeoutError:
