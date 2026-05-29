@@ -208,9 +208,6 @@ class CodeCrawler:
         return codes_found
 
     def _process_message(self, message: Message, channel_id: int, channel_title: str) -> int:
-        if not message.message and not message.file:
-            return 0
-
         msg_id = message.id
         msg_key = f"{channel_id}_{msg_id}"
         if msg_key in self._processed_messages:
@@ -218,13 +215,13 @@ class CodeCrawler:
         self._processed_messages.add(msg_key)
 
         found_count = 0
-        text = (message.message or "").strip()
+        text = getattr(message, "text", None) or (message.message or "").strip()
         caption = (getattr(message, "caption", None) or "").strip()
 
         all_texts = []
         if text:
-            all_texts.append(text)
-        if caption:
+            all_texts.append(text.strip())
+        if caption and caption != text:
             all_texts.append(caption)
 
         file_type = None
@@ -260,7 +257,7 @@ class CodeCrawler:
                     )
                     if ok:
                         found_count += 1
-                        logger.debug(f"[Crawl] 发现新码: {code} (来自 {channel_title})")
+                        logger.info(f"[Crawl] 发现文件码: {code} (来自 {channel_title})")
 
         return found_count
 
