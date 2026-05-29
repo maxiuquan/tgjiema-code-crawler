@@ -6,13 +6,24 @@ _BOT_PATTERN = re.compile(r"^[a-zA-Z0-9_]+bot", re.IGNORECASE)
 _BOT_PATTERN_IN_MESSAGE = re.compile(r"([a-zA-Z0-9_]+bot)", re.IGNORECASE)
 
 _CODE_WITH_BOT = re.compile(
-    r"(?:(?P<bot>[a-zA-Z0-9_]+bot)[:\s]+(?P<code>\S+))"
-    r"|(?:(?P<code2>\S+)[:\s]+(?P<bot2>[a-zA-Z0-9_]+bot))",
+    r"(?:(?P<bot>[a-zA-Z0-9_]+bot)[:_](?P<code>[a-zA-Z0-9_\-+/=]{4,}))"
+    r"|(?:(?P<code2>[a-zA-Z0-9_\-+/=]{4,})[:_](?P<bot2>[a-zA-Z0-9_]+bot))",
+    re.IGNORECASE,
+)
+
+_CODE_WITH_BOT_SPACED = re.compile(
+    r"(?:^|\s)(?P<bot>[a-zA-Z0-9_]+bot)\s+(?P<code>[a-zA-Z0-9_\-+/=]{8,})(?:\s|$)",
+    re.IGNORECASE,
+)
+
+_CODE_BOT_ATTACHED = re.compile(
+    r"(?:^|\s)(?P<bot>[a-zA-Z0-9]+bot)(?P<code>[a-zA-Z0-9][a-zA-Z0-9_\-+/=]{7,})(?:\s|$)",
     re.IGNORECASE,
 )
 
 _CODE_ONLY_BOT_INLINE = re.compile(
-    r"(?:^|\s)([a-zA-Z0-9_]+bot:[a-zA-Z0-9_]+)(?:\s|$)",
+    r"(?:^|\s)([a-zA-Z0-9_]+bot)[:_]([a-zA-Z0-9_\-+/=]{4,})(?:\s|$)",
+    re.IGNORECASE,
 )
 
 _FILE_EXTENSION_PATTERN = re.compile(
@@ -20,6 +31,38 @@ _FILE_EXTENSION_PATTERN = re.compile(
     r"jpg|jpeg|png|gif|mp4|mkv|avi|mp3|flac|wav|apk|iso|exe)(?:\s|$)",
     re.IGNORECASE,
 )
+
+_NON_BOT_WORDS = {
+    "robot", "chatbot", "adbot", "spambot", "bot", "webbot",
+    "knowbot", "microbot", "nanobot", "tbot", "autobot",
+    "megabot", "minibot", "superbot", "ultrabot", "hyperbot",
+    "cryptobot_excluded", "infobot", "databot", "netbot",
+    "searchbot", "crawlerbot", "parserbot", "scanbot",
+    "proxybot", "apitbot", "testbot", "debugbot",
+}
+
+
+def _is_valid_bot_name(bot_name: str) -> bool:
+    if len(bot_name) <= 3:
+        return False
+    if len(bot_name) > 25:
+        return False
+    if bot_name.lower() in _NON_BOT_WORDS:
+        return False
+    if not _BOT_PATTERN.match(bot_name):
+        return False
+    return True
+
+
+def _is_valid_code_part(code: str) -> bool:
+    if len(code) < 4:
+        return False
+    if not re.match(r'^[a-zA-Z0-9_\-+/=]+$', code):
+        return False
+    alpha_count = sum(1 for c in code if c.isalpha())
+    if alpha_count == 0:
+        return False
+    return True
 
 
 def extract_bot_username(text: str) -> str:
@@ -36,35 +79,97 @@ def is_external_code(text: str) -> bool:
 def extract_codes_from_message(text: str) -> List[Tuple[str, str, int]]:
     codes = []
     seen = set()
+    structured_code_parts: set = set()
 
     for match in _CODE_WITH_BOT.finditer(text):
         bot = match.group("bot") or match.group("bot2")
         code = match.group("code") or match.group("code2")
-        if bot and code:
-            normalized = re.sub(r'[^\w:]', '', f"{bot}:{code}")
+        if bot and code and _is_valid_bot_name(bot) and _is_valid_code_part(code):
+            normalized = f"{bot}:{code}"
             if normalized not in seen:
                 seen.add(normalized)
                 codes.append((normalized, bot, 100))
+                structured_code_parts.add(code)
             continue
 
     for match in _CODE_ONLY_BOT_INLINE.finditer(text):
-        raw = match.group(1)
-        bot = extract_bot_username(raw)
-        if bot:
-            normalized = raw.strip()
+        bot = match.group(1)
+        code = match.group(2)
+        if _is_valid_bot_name(bot) and _is_valid_code_part(code):
+            normalized = f"{bot}:{code}"
             if normalized not in seen:
                 seen.add(normalized)
                 codes.append((normalized, bot, 90))
+                structured_code_parts.add(code)
 
-    tokens = re.split(r'[\s,;:]+', text)
-    for token in tokens:
+    for match in _CODE_WITH_BOT_SPACED.finditer(text):
+        bot = match.group("bot")
+        code = match.group("code")
+        if _is_valid_bot_name(bot) and _is_valid_code_part(code):
+            normalized = f"{bot}:{code}"
+            if normalized not in seen:
+                seen.add(normalized)
+                codes.append((normalized, bot, 80))
+                structured_code_parts.add(code)
+
+    for match in _CODE_BOT_ATTACHED.finditer(text):
+        bot = match.group("bot")
+        code = match.group("code")
+        if _is_valid_bot_name(bot) and _is_valid_code_part(code):
+            normalized = f"{bot}:{code}"
+            if normalized not in seen:
+                seen.add(normalized)
+                codes.append((normalized, bot, 70))
+                structured_code_parts.add(code)
+
+    seen_bots = set()
+    tokens = re.split(r'[\s,;]+', text)
+    for i, token in enumerate(tokens):
         token = token.strip()
-        if not token:
+        if not token or not _BOT_PATTERN.match(token):
             continue
-        bot = extract_bot_username(token)
-        if bot and token not in seen:
-            seen.add(token)
-            codes.append((token, bot, 80))
+        if not _is_valid_bot_name(token):
+            continue
+        if token in seen_bots:
+            continue
+        seen_bots.add(token)
+
+        for j in range(i + 1, min(i + 4, len(tokens))):
+            next_token = tokens[j].strip()
+            if not next_token:
+                continue
+            if _is_valid_code_part(next_token) and len(next_token) >= 6:
+                normalized = f"{token}:{next_token}"
+                if normalized not in seen:
+                    seen.add(normalized)
+                    codes.append((normalized, token, 75))
+                break
+
+    all_bot_mentions: List[str] = []
+    for token in re.split(r'[\s,;:_]+', text):
+        token = token.strip().lstrip('@')
+        if _BOT_PATTERN.match(token) and _is_valid_bot_name(token) and token not in all_bot_mentions:
+            all_bot_mentions.append(token)
+
+    if all_bot_mentions:
+        orphan_tokens: List[str] = []
+        for token in re.split(r'[\s,;:_]+', text):
+            token = token.strip()
+            if not token or len(token) < 6:
+                continue
+            if token in structured_code_parts:
+                continue
+            if _BOT_PATTERN.match(token):
+                continue
+            if _is_valid_code_part(token) and token not in orphan_tokens:
+                orphan_tokens.append(token)
+
+        for orphan in orphan_tokens:
+            for bot in all_bot_mentions:
+                normalized = f"{bot}:{orphan}"
+                if normalized not in seen:
+                    seen.add(normalized)
+                    codes.append((normalized, bot, 60))
 
     return codes
 
@@ -76,8 +181,8 @@ def extract_codes_from_caption(text: str) -> List[Tuple[str, str, int]]:
     for match in _CODE_WITH_BOT.finditer(text):
         bot = match.group("bot") or match.group("bot2")
         code = match.group("code") or match.group("code2")
-        if bot and code:
-            normalized = re.sub(r'[^\w:]', '', f"{bot}:{code}")
+        if bot and code and _is_valid_bot_name(bot) and _is_valid_code_part(code):
+            normalized = f"{bot}:{code}"
             if normalized not in seen:
                 seen.add(normalized)
                 codes.append((normalized, bot, 100))

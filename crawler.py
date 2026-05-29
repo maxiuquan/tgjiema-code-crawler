@@ -143,21 +143,26 @@ class CodeCrawler:
             logger.warning(f"[Crawl] 获取频道实体失败 {channel_id}: {e}")
             return 0
 
-        is_member = False
-        try:
-            dialogs = await self.client.get_dialogs()
-            for d in dialogs:
-                if d.entity.id == channel_id:
-                    is_member = True
-                    break
-        except Exception:
-            pass
+        already_crawled = self.storage.get_channel_crawl_count(channel_id) > 0
 
-        if not is_member:
-            logger.info(f"[Crawl] 尚未加入频道 {title}，尝试加入...")
-            joined = await self.join_channel(entity)
-            if not joined:
-                return 0
+        if already_crawled:
+            logger.debug(f"[Crawl] 频道 {title} 已爬取过，跳过加入检查")
+        else:
+            is_member = False
+            try:
+                dialogs = await self.client.get_dialogs()
+                for d in dialogs:
+                    if d.entity.id == channel_id:
+                        is_member = True
+                        break
+            except Exception:
+                pass
+
+            if not is_member:
+                logger.info(f"[Crawl] 尚未加入频道 {title}，尝试加入...")
+                joined = await self.join_channel(entity)
+                if not joined:
+                    return 0
 
         self.storage.save_channel(
             channel_id=channel_id,

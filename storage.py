@@ -327,6 +327,13 @@ class Storage:
         rows = conn.execute("SELECT channel_id FROM channels WHERE is_active = 1").fetchall()
         return [r["channel_id"] for r in rows]
 
+    def get_channel_crawl_count(self, channel_id: int) -> int:
+        conn = self._conn
+        row = conn.execute(
+            "SELECT crawl_count FROM channels WHERE channel_id = ?", (channel_id,)
+        ).fetchone()
+        return row["crawl_count"] if row else 0
+
     def get_channel_count(self) -> int:
         conn = self._conn
         row = conn.execute("SELECT COUNT(*) as cnt FROM channels WHERE is_active = 1").fetchone()
