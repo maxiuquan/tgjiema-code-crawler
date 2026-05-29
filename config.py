@@ -2,6 +2,26 @@ import os
 from typing import List, Optional
 
 
+def _load_dotenv(env_path: str | None = None):
+    if env_path is None:
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip("\"'")
+            if key and not os.environ.get(key):
+                os.environ[key] = value
+
+
+_load_dotenv()
+
+
 class Settings:
     TELEGRAM_API_ID: int = 0
     TELEGRAM_API_HASH: str = ""

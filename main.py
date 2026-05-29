@@ -7,7 +7,7 @@ import sys
 from loguru import logger
 from telethon import TelegramClient
 
-from config import settings
+from config import settings, _load_dotenv
 from crawler import CodeCrawler
 from storage import Storage
 from resolver import CodeResolver
@@ -417,7 +417,7 @@ def main():
         return
 
     if args.env_file and os.path.exists(args.env_file):
-        _load_env_file(args.env_file)
+        _load_dotenv(args.env_file)
 
     commands = {
         "login": cmd_login,
@@ -435,20 +435,6 @@ def main():
     cmd = commands.get(args.command)
     if cmd:
         asyncio.run(cmd(args))
-
-
-def _load_env_file(path: str):
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            value = value.strip("\"'")
-            if key and not os.environ.get(key):
-                os.environ[key] = value
 
 
 if __name__ == "__main__":

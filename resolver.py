@@ -330,17 +330,18 @@ class CodeResolver:
 
         batch_ids_str = ",".join(str(s) for s in storage_ids)
         batch_meta_json = json.dumps(media_meta) if media_meta else ""
+        file_ids_str = ",".join(m.get("file_id", "") for m in media_meta)
 
         try:
             async with self._db_pool.acquire() as conn:
                 existing = await conn.fetchrow(
-                    "SELECT file_code, batch_msg_ids FROM file_records WHERE file_code = $1",
+                    "SELECT file_code, batch_msg_ids, file_ids FROM file_records WHERE file_code = $1",
                     code,
                 )
 
                 if existing:
                     # ── 追加 batch_msg_ids ──
-                    # 与主系统 _cache_external_file L367-L377 一致
+                    # 与主系统 _cache_external_file L367-L377 完全一致
                     raw_batch = existing["batch_msg_ids"] or ""
                     if not isinstance(raw_batch, str):
                         raw_batch = str(raw_batch)
@@ -350,38 +351,66 @@ class CodeResolver:
                             batch_ids.append(sid_str)
                     new_batch_str = ",".join(batch_ids)
 
+                    # 同时追加 file_ids
+                    raw_fids = existing["file_ids"] or ""
+                    if not isinstance(raw_fids, str):
+                        raw_fids = str(raw_fids)
+                    existing_fids = [f for f in raw_fids.split(",") if f.strip()]
+                    for fid in (m.get("file_id", "") for m in media_meta):
+                        if fid and fid not in existing_fids:
+                            existing_fids.append(fid)
+                    new_file_ids = ",".join(existing_fids)
+
                     await conn.execute(
                         """UPDATE file_records SET
                            batch_msg_ids = $1,
                            batch_file_meta = $2,
+                           file_ids = $3,
+                           primary_channel_id = $4,
                            status = 'active'
-                           WHERE file_code = $3""",
-                        new_batch_str, batch_meta_json, code,
+                           WHERE file_code = $5""",
+                        new_batch_str, batch_meta_json, new_file_ids,
+                        storage_channel, code,
                     )
-                    logger.info(f"[_cache_external_file] 外部码 {code} 追加 batch_msg_ids={new_batch_str}")
+                    logger.info(
+                        f"[_cache_external_file] 外部码 {code} 追加: "
+                        f"batch_msg_ids={new_batch_str}, file_ids={new_file_ids}"
+                    )
                 else:
                     # ── 创建新记录 ──
-                    # 与主系统 make_file_record L44-L72 一致
+                    # 与主系统 make_file_record L44-L72 完全一致
+                    # 所有字段与 file_records DDL 严格对应:
+                    #   file_code, uploader_id, primary_channel_id, primary_channel_msg_id,
+                    #   file_types, backup_channel_msg_ids, batch_msg_ids, batch_file_meta,
+                    #   file_ids, status, request_count, create_time, expire_time
                     now = datetime.now(timezone.utc)
                     await conn.execute(
                         """INSERT INTO file_records
                            (file_code, uploader_id, primary_channel_id, primary_channel_msg_id,
-                            file_types, batch_msg_ids, batch_file_meta, status, request_count, create_time)
-                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)""",
+                            file_types, backup_channel_msg_ids, batch_msg_ids, batch_file_meta,
+                            file_ids, status, request_count, create_time, expire_time)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
                         code,
                         0,
                         storage_channel,
                         storage_ids[0],
                         json.dumps({"external": True, "source_bot": bot_username}),
+                        "",
                         batch_ids_str,
                         batch_meta_json,
+                        file_ids_str,
                         "active",
                         0,
                         now,
+                        None,
                     )
-                    logger.info(f"[_cache_external_file] 外部码已缓存到本地: {code}")
+                    logger.info(
+                        f"[_cache_external_file] 外部码已缓存到本地: {code}, "
+                        f"channel={storage_channel}, msg_ids=[{batch_ids_str}]"
+                    )
 
                 # ── code_bot_mapping ──
+                # 与主系统 save_code_bot_mapping 一致
                 mapping = await conn.fetchrow(
                     "SELECT code FROM code_bot_mapping WHERE code = $1", code
                 )
