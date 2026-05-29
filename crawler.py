@@ -53,9 +53,9 @@ class CodeCrawler:
                     username = getattr(entity, "username", "") or ""
 
                     if any(term in title for term in search_terms):
-                        if entity.id not in [c["id"] for c in found]:
+                        if entity.id not in [c["channel_id"] for c in found]:
                             found.append({
-                                "id": entity.id,
+                                "channel_id": entity.id,
                                 "username": username,
                                 "title": getattr(entity, "title", ""),
                                 "type": "channel" if isinstance(entity, Channel) else "group",
@@ -63,21 +63,19 @@ class CodeCrawler:
                             })
 
                 try:
-                    search_results = await self.client(
-                        self.client._tg.functions.contacts.SearchRequest(
-                            q=keyword, limit=settings.SEARCH_LIMIT
-                        )
+                    search_results = await self.client.search(
+                        q=keyword, broadcast=True, limit=settings.SEARCH_LIMIT
                     )
-                    for chat in search_results.chats:
-                        if isinstance(chat, (Channel, Chat)):
-                            cid = chat.id
-                            if cid not in [c["id"] for c in found]:
+                    for result in search_results:
+                        if isinstance(result.chat, (Channel, Chat)):
+                            cid = result.chat.id
+                            if cid not in [c["channel_id"] for c in found]:
                                 found.append({
-                                    "id": cid,
-                                    "username": getattr(chat, "username", "") or "",
-                                    "title": getattr(chat, "title", ""),
-                                    "type": "channel" if isinstance(chat, Channel) else "group",
-                                    "members": getattr(chat, "participants_count", 0),
+                                    "channel_id": cid,
+                                    "username": getattr(result.chat, "username", "") or "",
+                                    "title": getattr(result.chat, "title", ""),
+                                    "type": "channel" if isinstance(result.chat, Channel) else "group",
+                                    "members": getattr(result.chat, "participants_count", 0),
                                 })
                 except Exception as e:
                     logger.warning(f"[Discover] contacts.Search 失败: {e}")
@@ -102,7 +100,7 @@ class CodeCrawler:
                     continue
                 entity = dialog.entity
                 found.append({
-                    "id": entity.id,
+                    "channel_id": entity.id,
                     "username": getattr(entity, "username", "") or "",
                     "title": getattr(entity, "title", ""),
                     "type": "channel" if isinstance(entity, Channel) else "group",
@@ -131,7 +129,7 @@ class CodeCrawler:
             return False
 
     async def crawl_channel(self, channel_info: dict) -> int:
-        channel_id = channel_info["id"]
+        channel_id = channel_info["channel_id"]
         title = channel_info.get("title", f"channel_{channel_id}")
         codes_found = 0
 
@@ -274,17 +272,14 @@ class CodeCrawler:
 
         self._running = True
         stats = {"channels_found": 0, "channels_crawled": 0, "codes_found": 0}
+        all_channels = []
 
-        logger.info("[Crawler] 开始全面发现频道...")
-
+        logger.info("[Crawler] 自动发现频道（从对话列表）...")
         dialog_channels = await self.discover_channels_from_dialogs()
         for ch in dialog_channels:
             if not self._running:
                 break
-            cid = ch["id"]
-            if self.storage.get_channel_ids() and cid in self.storage.get_channel_ids():
-                if settings.SKIP_JOINED_CHANNELS:
-                    continue
+            cid = ch["channel_id"]
             self.storage.save_channel(
                 channel_id=cid,
                 username=ch.get("username", ""),
@@ -292,13 +287,15 @@ class CodeCrawler:
                 channel_type=ch.get("type", "channel"),
                 member_count=ch.get("members", 0),
             )
+            all_channels.append(ch)
 
+        logger.info("[Crawler] 自动发现频道（从全局搜索）...")
         search_channels = await self.discover_channels_by_search()
         for ch in search_channels:
             if not self._running:
                 break
             new = self.storage.save_channel(
-                channel_id=ch["id"],
+                channel_id=ch["channel_id"],
                 username=ch.get("username", ""),
                 title=ch.get("title", ""),
                 channel_type=ch.get("type", "channel"),
@@ -307,8 +304,13 @@ class CodeCrawler:
             if new:
                 stats["channels_found"] += 1
 
-        all_channels = self.storage.get_all_channels(active_only=True)
-        logger.info(f"[Crawler] 共发现 {len(all_channels)} 个频道，开始爬取...")
+        if search_channels:
+            existing_ids = {c["channel_id"] for c in all_channels}
+            for ch in search_channels:
+                if ch["channel_id"] not in existing_ids:
+                    all_channels.append(ch)
+
+        logger.info(f"[Crawler] 共 {len(all_channels)} 个频道，开始爬取...")
 
         semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_CRAWLS)
 

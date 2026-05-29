@@ -50,7 +50,7 @@ class Settings:
         "mp3", "flac", "wav", "apk", "iso", "exe",
     ]
 
-    SKIP_JOINED_CHANNELS: bool = True
+    SKIP_JOINED_CHANNELS: bool = False
 
     MAX_CONCURRENT_CRAWLS: int = 3
 
