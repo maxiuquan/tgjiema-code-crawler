@@ -504,9 +504,8 @@ class CodeResolver:
 
         logger.info(f"[Resolver] @{bot_username} 返回了 {len(media_events)} 个文件")
 
-        # ── 复制到存储频道 ──
+        # ── 复制到存储频道（无来源转发）──
         all_storage_ids: list[int] = []
-        all_media_meta: list[dict] = []
 
         for ev in media_events:
             msg = ev.message
@@ -514,24 +513,16 @@ class CodeResolver:
                 continue
 
             try:
-                forwarded = await self.client.forward_messages(
+                sent = await self.client.send_file(
                     storage_channel,
-                    messages=msg.id,
-                    from_peer=msg.chat_id if msg.chat_id else entity,
+                    msg.media,
+                    caption="",
                 )
-                if isinstance(forwarded, list):
-                    copied = forwarded[0]
-                else:
-                    copied = forwarded
-                storage_msg_id = copied.id
+                storage_msg_id = sent.id
                 all_storage_ids.append(storage_msg_id)
 
-                fid, ftype = self._extract_media_info(msg)
-                all_media_meta.append({"msg_id": str(msg.id), "file_id": fid, "type": ftype})
-
                 logger.debug(
-                    f"[Resolver] 已复制文件到存储频道: "
-                    f"msg_id={storage_msg_id}, type={ftype}, file_id={fid[:30] if fid else 'N/A'}"
+                    f"[Resolver] 已复制文件到存储频道: msg_id={storage_msg_id}"
                 )
             except Exception as e:
                 logger.error(f"[Resolver] 复制 message_id={msg.id} 到存储频道失败: {e}")
@@ -545,16 +536,6 @@ class CodeResolver:
             return False
 
         batch_ids_str = ",".join(str(s) for s in all_storage_ids)
-
-        # ── 写入 CockroachDB ──
-        if db_ok:
-            await self._cache_external_file(
-                code=code,
-                bot_username=bot_username,
-                storage_channel=storage_channel,
-                storage_ids=all_storage_ids,
-                media_meta=all_media_meta,
-            )
 
         self.storage.mark_resolved(
             code_id=code_id,

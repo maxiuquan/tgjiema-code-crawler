@@ -104,6 +104,7 @@ class Storage:
             "storage_channel_id": "ALTER TABLE file_codes ADD COLUMN storage_channel_id INTEGER DEFAULT 0",
             "storage_msg_id": "ALTER TABLE file_codes ADD COLUMN storage_msg_id INTEGER DEFAULT 0",
             "storage_batch_msg_ids": "ALTER TABLE file_codes ADD COLUMN storage_batch_msg_ids TEXT",
+            "is_crdb_synced": "ALTER TABLE file_codes ADD COLUMN is_crdb_synced INTEGER DEFAULT 0",
         }
         for col, sql in new_columns.items():
             if col not in existing_columns:
@@ -308,6 +309,28 @@ class Storage:
         placeholders = ",".join("?" * len(code_ids))
         conn.execute(
             f"UPDATE file_codes SET is_exported = 1 WHERE id IN ({placeholders})",
+            code_ids
+        )
+        conn.commit()
+
+    def get_resolved_unsynced(self, limit: int = 200) -> List[dict]:
+        conn = self._conn
+        rows = conn.execute(
+            """SELECT * FROM file_codes
+               WHERE is_resolved = 1 AND (is_crdb_synced IS NULL OR is_crdb_synced = 0)
+               ORDER BY discovered_at ASC
+               LIMIT ?""",
+            (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_crdb_synced(self, code_ids: List[int]):
+        conn = self._conn
+        if not code_ids:
+            return
+        placeholders = ",".join("?" * len(code_ids))
+        conn.execute(
+            f"UPDATE file_codes SET is_crdb_synced = 1 WHERE id IN ({placeholders})",
             code_ids
         )
         conn.commit()

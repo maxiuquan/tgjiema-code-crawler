@@ -129,6 +129,9 @@ async def cmd_daemon(args):
     _resolver_instance = resolver
 
     running = True
+    last_resolved_sync_time = 0.0
+    SYNC_INTERVAL_HOURS = 6
+    SYNC_INTERVAL_SECONDS = SYNC_INTERVAL_HOURS * 3600
 
     def _signal_handler():
         nonlocal running
@@ -162,14 +165,29 @@ async def cmd_daemon(args):
         except Exception as e:
             logger.error(f"[Daemon] 解析阶段失败: {e}")
 
-        # 3. 同步到 CockroachDB
+        # 3. 同步到 CockroachDB（基础码同步每轮都执行，已解析记录每6小时间步一次）
         if settings.COCKROACHDB_URL:
-            logger.info("[Daemon] 阶段3: 同步到 CockroachDB...")
+            now = asyncio.get_event_loop().time()
+            should_sync_resolved = (now - last_resolved_sync_time) >= SYNC_INTERVAL_SECONDS
+
+            if should_sync_resolved:
+                logger.info(f"[Daemon] 阶段3: 同步已解析记录到 CockroachDB（{SYNC_INTERVAL_HOURS}小时间隔）...")
+                try:
+                    synced = await syncer.sync_all_resolved(batch_size=200)
+                    logger.info(f"[Daemon] 已解析记录同步完成: {synced} 条")
+                except Exception as e:
+                    logger.error(f"[Daemon] 同步已解析记录失败: {e}")
+                last_resolved_sync_time = now
+            else:
+                remaining = SYNC_INTERVAL_SECONDS - (now - last_resolved_sync_time)
+                logger.debug(f"[Daemon] 阶段3: 距下次已解析记录同步还有 {remaining/3600:.1f} 小时，跳过")
+
+            logger.info("[Daemon] 阶段3: 同步基础文件码到 CockroachDB...")
             try:
                 synced = await syncer.sync_all(batch_size=1000)
-                logger.info(f"[Daemon] 同步完成: {synced} 个")
+                logger.info(f"[Daemon] 基础码同步完成: {synced} 个")
             except Exception as e:
-                logger.error(f"[Daemon] 同步阶段失败: {e}")
+                logger.error(f"[Daemon] 基础码同步失败: {e}")
 
         overall = storage.get_crawl_stats()
         resolve_st = storage.get_resolve_stats()
