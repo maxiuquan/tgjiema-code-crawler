@@ -270,7 +270,7 @@ class Storage:
             (storage_channel_id, storage_msg_id, storage_batch_ids, code_id)
         )
         conn.execute(
-            """INSERT INTO resolve_log (code, bot_username, status,
+            """INSERT INTO resolve_log (code, status,
                storage_msg_id, completed_at, started_at)
                VALUES ((SELECT code FROM file_codes WHERE id=?), 'done', ?, ?, ?)""",
             (code_id, storage_msg_id, now, now)
