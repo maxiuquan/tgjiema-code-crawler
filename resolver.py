@@ -396,6 +396,19 @@ class CodeResolver:
             logger.debug(f"[Resolver] @{bot_username} 正在被处理中，跳过重复")
             return False
 
+        # ── 检查是否已在 CockroachDB 中解析过 ──
+        if db_ok:
+            already = await self._check_already_resolved(code)
+            if already:
+                logger.info(f"[Resolver] 文件码 {code} 已在 CockroachDB 中存在，标记为已解析并跳过")
+                self.storage.mark_resolved(
+                    code_id=code_id,
+                    storage_channel_id=already.get("primary_channel_id", 0),
+                    storage_msg_id=already.get("primary_channel_msg_id", 0),
+                    storage_batch_ids=already.get("batch_msg_ids", ""),
+                )
+                return True
+
         # ── 获取外部机器人实体 ──
         try:
             entity = await self.client.get_entity(bot_username)
@@ -506,7 +519,10 @@ class CodeResolver:
                     messages=msg.id,
                     from_peer=msg.chat_id if msg.chat_id else entity,
                 )
-                copied = forwarded[0]
+                if isinstance(forwarded, list):
+                    copied = forwarded[0]
+                else:
+                    copied = forwarded
                 storage_msg_id = copied.id
                 all_storage_ids.append(storage_msg_id)
 
@@ -716,6 +732,30 @@ class CodeResolver:
             logger.debug(f"[Resolver] 提取 file_id 失败: {e}")
 
         return "", "document"
+
+    # ─── 检查是否已解析 ─────────────────────────────────
+
+    async def _check_already_resolved(self, code: str) -> dict | None:
+        if not self._db_pool or getattr(self._db_pool, "_closed", False):
+            return None
+        try:
+            async with self._db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """SELECT file_code, primary_channel_id,
+                              primary_channel_msg_id, batch_msg_ids
+                       FROM file_records
+                       WHERE file_code = $1 AND status = 'active'""",
+                    code,
+                )
+                if row:
+                    return {
+                        "primary_channel_id": row["primary_channel_id"] or 0,
+                        "primary_channel_msg_id": row["primary_channel_msg_id"] or 0,
+                        "batch_msg_ids": row["batch_msg_ids"] or "",
+                    }
+        except Exception as e:
+            logger.debug(f"[Resolver] 检查已解析码失败 (code={code}): {e}")
+        return None
 
     # ─── CockroachDB 缓存 ─────────────────────────────────
 
