@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TG文件码系统 - 整体流程图</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;600;700;900&display=swap');
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Noto Sans SC', sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    background: linear-gradient(135deg, #1e293b, #0f172a);
+    border-bottom: 1px solid #1e3a5f;
+    padding: 20px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  header h1 {
+    font-size: 22px;
+    font-weight: 900;
+    background: linear-gradient(90deg, #60a5fa, #34d399);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  header .subtitle {
+    font-size: 13px;
+    color: #94a3b8;
+  }
+  header .controls {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .controls button {
+    background: #1e293b;
+    border: 1px solid #334155;
+    color: #cbd5e1;
+    padding: 6px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    transition: .2s;
+  }
+  .controls button:hover {
+    background: #334155;
+    border-color: #60a5fa;
+  }
+  .controls .zoom-label {
+    font-size: 12px;
+    color: #64748b;
+    min-width: 40px;
+    text-align: center;
+  }
+
+  main {
+    flex: 1;
+    overflow: auto;
+    padding: 20px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+  }
+
+  #canvas-wrapper {
+    transform-origin: top center;
+    transition: transform .2s;
+  }
+
+  .flow-chart {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    min-width: 900px;
+    padding: 20px 0;
+  }
+
+  /* ===== 列布局容器 ===== */
+  .layer-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 40px;
+    width: 100%;
+    position: relative;
+  }
+
+  /* ===== 模块卡片 ===== */
+  .module {
+    border-radius: 10px;
+    padding: 18px 22px 16px;
+    min-width: 220px;
+    max-width: 300px;
+    position: relative;
+  }
+  .module .title {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .module .desc {
+    font-size: 12px;
+    line-height: 1.5;
+    opacity: .85;
+  }
+  .module .sub-items {
+    margin-top: 6px;
+    font-size: 11px;
+    line-height: 1.6;
+    opacity: .7;
+    padding-left: 4px;
+  }
+
+  .module.crawler {
+    background: linear-gradient(135deg, #1a237e33, #0d47a122);
+    border: 1px solid #1a73e866;
+  }
+  .module.crawler .title { color: #64b5f6; }
+
+  .module.main {
+    background: linear-gradient(135deg, #1b5e2033, #2e7d3222);
+    border: 1px solid #43a04766;
+  }
+  .module.main .title { color: #81c784; }
+
+  .module.shared {
+    background: linear-gradient(135deg, #e6510033, #f57c0022);
+    border: 1px solid #ff980066;
+  }
+  .module.shared .title { color: #ffb74d; }
+
+  .module.storage {
+    background: linear-gradient(135deg, #4a148c33, #6a1b9a22);
+    border: 1px solid #ab47bc66;
+  }
+  .module.storage .title { color: #ce93d8; }
+
+  .module.user {
+    background: linear-gradient(135deg, #b71c1c33, #c6282822);
+    border: 1px solid #ef535066;
+  }
+  .module.user .title { color: #ef9a9a; }
+
+  /* ===== 连接线 ===== */
+  .connector {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2px 0;
+    position: relative;
+  }
+  .connector .line {
+    width: 2px;
+    height: 20px;
+    background: linear-gradient(180deg, #475569, #64748b);
+  }
+  .connector .arrow {
+    width: 0; height: 0;
+    border-left: 6px solid transparent;
+    border-right: 6px solid transparent;
+    border-top: 8px solid #64748b;
+  }
+  .connector .label {
+    font-size: 10px;
+    color: #94a3b8;
+    margin: 2px 0;
+    background: #0f172a;
+    padding: 0 6px;
+    white-space: nowrap;
+  }
+
+  /* 水平连接 */
+  .h-connector {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    position: relative;
+    padding: 0 4px;
+  }
+  .h-connector .hline {
+    height: 2px;
+    width: 30px;
+    background: linear-gradient(90deg, #475569, #64748b);
+  }
+  .h-connector .arrow-right {
+    width: 0; height: 0;
+    border-top: 6px solid transparent;
+    border-bottom: 6px solid transparent;
+    border-left: 8px solid #64748b;
+  }
+  .h-connector .label {
+    font-size: 10px;
+    color: #94a3b8;
+    position: absolute;
+    top: -14px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #0f172a;
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+
+  /* ===== 分组标题 ===== */
+  .section-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #94a3b8;
+    margin: 10px 0 4px;
+    padding: 4px 16px;
+    border-radius: 12px;
+    background: #1e293b;
+    display: inline-block;
+    letter-spacing: 1px;
+  }
+  .section-title.crawler-title { color: #64b5f6; border: 1px solid #1a73e844; }
+  .section-title.main-title { color: #81c784; border: 1px solid #43a04744; }
+
+  /* ===== 双列容器 ===== */
+  .dual-col {
+    display: flex;
+    gap: 60px;
+    align-items: flex-start;
+  }
+
+  .col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  /* ===== 步骤编号徽章 ===== */
+  .step-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    font-size: 10px;
+    font-weight: 700;
+    margin-right: 4px;
+    flex-shrink: 0;
+  }
+  .step-badge.sb-crawler { background: #1a73e8; color: #fff; }
+  .step-badge.sb-main { background: #2e7d32; color: #fff; }
+
+  /* ===== 提示 ===== */
+  .tooltip-area {
+    margin-top: 16px;
+    padding: 12px 20px;
+    background: #1e293b;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #94a3b8;
+    line-height: 1.6;
+    max-width: 600px;
+    text-align: center;
+  }
+
+  .scale-control {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 图例 */
+  .legend {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    margin-top: 16px;
+    flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #94a3b8;
+    padding: 4px 10px;
+    background: #1e293b;
+    border-radius: 6px;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>TG 文件码系统 · 整体流程图</h1>
+    <div class="subtitle">tgjiema（主程序）+ tgjiema-code-crawler（爬虫） 联动架构</div>
+  </div>
+  <div class="controls">
+    <div class="scale-control">
+      <button onclick="zoomOut()">−</button>
+      <span class="zoom-label" id="zoomLabel">100%</span>
+      <button onclick="zoomIn()">+</button>
+    </div>
+    <button onclick="resetZoom()">重置</button>
+  </div>
+</header>
+<main id="main">
+<div id="canvas-wrapper">
+
+<div class="flow-chart">
+
+  <!-- ===================== 第0层：用户 & 外部系统 ===================== -->
+  <div class="layer-row">
+    <div class="module user" style="min-width:160px">
+      <div class="title">👤 Telegram 用户</div>
+      <div class="desc">发送文件 / 发送文件码 / 接收文件</div>
+      <div class="sub-items">• 免费/基础/高级会员<br>• 有日配额限制</div>
+    </div>
+    <div class="h-connector"><div class="hline"></div><div class="arrow-right"></div></div>
+    <div class="module user" style="min-width:180px">
+      <div class="title">🤖 外部 Telegram Bot</div>
+      <div class="desc">如 QQfile2_bot、ShareBot 等<br>第三方文件分享机器人</div>
+    </div>
+  </div>
+
+  <div class="connector"><div class="line" style="height:24px"></div><div class="arrow"></div><div class="label">文件 / 文件码</div></div>
+
+  <!-- ===================== 第1层：主程序 机器人层 ===================== -->
+  <div class="section-title main-title">🖥️ tgjiema（主程序）— 机器人层</div>
+
+  <div class="layer-row" style="gap:16px; flex-wrap:wrap;">
+    <div class="module main" style="min-width:180px">
+      <div class="title"><span class="step-badge sb-main">1</span>📤 upload_bot</div>
+      <div class="desc">接收用户上传的文件<br>转发到存储频道</div>
+      <div class="sub-items">• 单文件/媒体组/批次模式<br>• 写入 pending_uploads</div>
+    </div>
+    <div class="module main" style="min-width:200px">
+      <div class="title"><span class="step-badge sb-main">2</span>🔓 decoder_bot</div>
+      <div class="desc">接收用户发送的文件码<br>查询DB → 入队发送任务</div>
+      <div class="sub-items">• 本系统码 / 外部码路由<br>• 权限 & 配额检查<br>• user_relay 中继代发</div>
+    </div>
+    <div class="module main" style="min-width:180px">
+      <div class="title"><span class="step-badge sb-main">3</span>📨 sender_bot</div>
+      <div class="desc">出队 send_queue<br>从存储频道转发文件给用户</div>
+      <div class="sub-items">• 单文件 / 批量媒体组<br>• 支持分页翻页<br>• 失败回退备份频道</div>
+    </div>
+    <div class="module main" style="min-width:180px">
+      <div class="title"><span class="step-badge sb-main">4</span>💾 backup_bot ×3</div>
+      <div class="desc">实时备份存储频道消息<br>到3组备份频道</div>
+      <div class="sub-items">• 实时 channel_post 监控<br>• 定时全量扫描补齐<br>• 更新 backup_channel_msg_ids</div>
+    </div>
+    <div class="module main" style="min-width:170px">
+      <div class="title"><span class="step-badge sb-main">5</span>⚙️ admin_bot</div>
+      <div class="desc">管理员管理面板</div>
+      <div class="sub-items">• 用户/文件/配置管理<br>• 中继配置 / 工厂重置</div>
+    </div>
+  </div>
+
+  <!-- 箭头连线 -->
+  <div class="connector" style="margin-top:6px">
+    <div class="line" style="height:10px"></div><div class="arrow"></div>
+    <div class="label" style="font-size:11px;color:#60a5fa;">爬虫项目独立运行，与主程序共享 DB 和存储频道</div>
+  </div>
+
+  <!-- ===================== 第2层：双列 = 主程序服务 + 爬虫 ===================== -->
+  <div class="layer-row" style="gap:80px;">
+    <!-- 左列：主程序服务层 -->
+    <div class="col">
+      <div class="section-title main-title">🖥️ 主程序 — 服务层 & 存储</div>
+      <div class="layer-row" style="flex-direction:column;gap:10px;align-items:center;">
+        <div class="module shared" style="min-width:320px">
+          <div class="title">🗄️ CockroachDB（共享数据库）</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;line-height:1.7;">
+            <span style="color:#ffb74d;">file_records</span><span style="color:#94a3b8;">文件记录（核心）</span>
+            <span style="color:#ffb74d;">users</span><span style="color:#94a3b8;">用户 & 会员等级</span>
+            <span style="color:#ffb74d;">send_queue</span><span style="color:#94a3b8;">发送任务队列</span>
+            <span style="color:#ffb74d;">pending_uploads</span><span style="color:#94a3b8;">待处理上传</span>
+            <span style="color:#ffb74d;">decode_logs</span><span style="color:#94a3b8;">解码日志</span>
+            <span style="color:#ffb74d;">code_bot_mapping</span><span style="color:#94a3b8;">码↔机器人映射</span>
+            <span style="color:#ffb74d;">backup_config</span><span style="color:#94a3b8;">系统配置</span>
+            <span style="color:#ffb74d;">message_backups</span><span style="color:#94a3b8;">消息备份关系</span>
+          </div>
+        </div>
+
+        <div class="module storage" style="min-width:320px">
+          <div class="title">📺 Telegram 存储频道</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;line-height:1.7;">
+            <span style="color:#ce93d8;">主存储频道</span><span style="color:#94a3b8;">所有文件汇集于此</span>
+            <span style="color:#ce93d8;">备份频道组1-3</span><span style="color:#94a3b8;">3组冗余备份</span>
+          </div>
+        </div>
+
+        <div class="module main" style="min-width:320px">
+          <div class="title">🔧 核心服务</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;font-size:11px;line-height:1.7;">
+            <span style="color:#81c784;">code_generator</span><span style="color:#94a3b8;">生成 tgwenjian_xxx 码</span>
+            <span style="color:#81c784;">queue_manager</span><span style="color:#94a3b8;">发送队列入队/出队</span>
+            <span style="color:#81c784;">permission</span><span style="color:#94a3b8;">权限 & 配额检查</span>
+            <span style="color:#81c784;">user_relay</span><span style="color:#94a3b8;">用户中继（突破 bot 限制）</span>
+            <span style="color:#81c784;">channel_selector</span><span style="color:#94a3b8;">频道负载均衡</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右列：爬虫 -->
+    <div class="col">
+      <div class="section-title crawler-title">📡 tgjiema-code-crawler（爬虫）</div>
+      <div class="layer-row" style="flex-direction:column;gap:10px;align-items:center;">
+        <div class="module crawler" style="min-width:280px">
+          <div class="title">① 🕷️ crawler.py</div>
+          <div class="desc">爬取已加入 Telegram 频道中的消息<br>调用 code_extractor 提取文件码</div>
+          <div class="sub-items">• 获取已加入频道列表<br>• 遍历消息（limit=200/频道）<br>• 并发爬取（信号量控制）</div>
+        </div>
+
+        <div class="connector"><div class="line" style="height:14px"></div><div class="arrow"></div></div>
+
+        <div class="module crawler" style="min-width:280px">
+          <div class="title">② 🔍 code_extractor.py</div>
+          <div class="desc">正则提取 bot:code 格式文件码<br>支持多种书写格式</div>
+          <div class="sub-items">• bot:code / bot_code / bot code<br>• 紧邻附加 / 无头码关联<br>• 返回 (code, bot, 置信度)</div>
+        </div>
+
+        <div class="connector"><div class="line" style="height:14px"></div><div class="arrow"></div></div>
+
+        <div class="module crawler" style="min-width:280px">
+          <div class="title">③ 💾 storage.py（SQLite）</div>
+          <div class="desc">本地 SQLite 存储 codes.db<br>file_codes 表存放发现的文件码</div>
+          <div class="sub-items">• 缓存待解析码<br>• 跟踪解析状态/重试次数<br>• 支持导出 JSON/CSV</div>
+        </div>
+
+        <div class="connector"><div class="line" style="height:14px"></div><div class="arrow"></div></div>
+
+        <div class="module crawler" style="min-width:280px">
+          <div class="title">④ 🔄 resolver.py</div>
+          <div class="desc">向外部 Telegram Bot 发送码<br>收集返回的文件 → 复制到存储频道</div>
+          <div class="sub-items">• 事件驱动（NewMessage 监听）<br>• 支持翻页（自动检测+点击）<br>• settle 等待机制<br>• 限速检测与处理</div>
+        </div>
+
+        <div class="connector"><div class="line" style="height:14px"></div><div class="arrow"></div></div>
+
+        <div class="module crawler" style="min-width:280px">
+          <div class="title">⑤ 📤 cockroach_sync.py</div>
+          <div class="desc">将解析结果同步到 CockroachDB<br>写入 file_records & code_bot_mapping</div>
+          <div class="sub-items">• 基础码同步（未导出记录）<br>• 已解析记录同步（storage 位置）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===================== 第3层：联动标注 ===================== -->
+  <div style="margin-top:20px;width:100%;border-top:1px solid #1e3a5f;padding-top:16px;">
+    <div class="section-title" style="font-size:13px;">🔗 联动核心</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;max-width:900px;margin:0 auto;">
+      <div class="module main" style="min-width:auto;">
+        <div class="title" style="font-size:13px;">共享 CockroachDB</div>
+        <div class="desc" style="font-size:11px;">
+          爬虫写入  → <b style="color:#ffb74d;">file_records</b><br>
+          主程序查询 → 发送文件给用户<br>
+          写入 <b style="color:#ffb74d;">code_bot_mapping</b>
+        </div>
+      </div>
+      <div class="module storage" style="min-width:auto;">
+        <div class="title" style="font-size:13px;">共享存储频道</div>
+        <div class="desc" style="font-size:11px;">
+          <b>upload_bot</b> → 用户上传文件<br>
+          <b>resolver</b> → 解析外部文件<br>
+          <b>user_relay</b> → 中继缓存文件<br>
+          <b>sender_bot</b> → 读取并发送
+        </div>
+      </div>
+      <div class="module shared" style="min-width:auto;">
+        <div class="title" style="font-size:13px;">外部码两种路径</div>
+        <div class="desc" style="font-size:11px;">
+          <b>路径A(爬虫):</b> 批量爬→解析→存DB<br>
+          <b>路径B(中继):</b> 用户请求→中继代发→实时缓存<br>
+          殊途同归 → sender_bot 发送
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图例 -->
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#64b5f6"></div>📡 tgjiema-code-crawler（爬虫）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#81c784"></div>🖥️ tgjiema（主程序）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ffb74d"></div>🗄️ 共享数据库</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ce93d8"></div>📺 存储频道</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ef9a9a"></div>🌐 用户/外部</div>
+  </div>
+
+</div><!-- /flow-chart -->
+</div><!-- /canvas-wrapper -->
+</main>
+
+<script>
+let scale = 1;
+const wrapper = document.getElementById('canvas-wrapper');
+const zoomLabel = document.getElementById('zoomLabel');
+
+function applyZoom() {
+  wrapper.style.transform = `scale(${scale})`;
+  zoomLabel.textContent = Math.round(scale * 100) + '%';
+}
+
+function zoomIn() {
+  scale = Math.min(scale + 0.1, 2.0);
+  applyZoom();
+}
+
+function zoomOut() {
+  scale = Math.max(scale - 0.1, 0.4);
+  applyZoom();
+}
+
+function resetZoom() {
+  scale = 1;
+  applyZoom();
+}
+
+// Mouse wheel zoom
+document.getElementById('main').addEventListener('wheel', function(e) {
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault();
+    if (e.deltaY < 0) zoomIn();
+    else zoomOut();
+  }
+}, { passive: false });
+</script>
+</body>
+</html>
