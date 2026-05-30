@@ -2,7 +2,9 @@ import argparse
 import asyncio
 import os
 import signal
+import sqlite3
 import sys
+import time
 
 from loguru import logger
 from telethon import TelegramClient
@@ -311,28 +313,55 @@ def _setup_signal_handlers(handler):
                 signal.signal(sig, lambda s, f: handler())
 
 
-async def _create_client() -> TelegramClient:
+def _init_session_db():
+    session_path = "code_crawler_session.session"
+    try:
+        conn = sqlite3.connect(session_path, timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.close()
+        logger.debug(f"Session 数据库已初始化 (WAL模式, busy_timeout=5000)")
+    except Exception as e:
+        logger.warning(f"Session 数据库初始化失败: {e}")
+
+
+async def _create_client(retries: int = 3) -> TelegramClient:
     if not settings.TELEGRAM_API_ID or not settings.TELEGRAM_API_HASH:
         logger.error("请设置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH 环境变量")
         sys.exit(1)
 
-    client = TelegramClient(
-        "code_crawler_session",
-        settings.TELEGRAM_API_ID,
-        settings.TELEGRAM_API_HASH,
-        device_model="CodeCrawler",
-        app_version="1.0.0",
-    )
-    await client.start(phone=settings.TELEGRAM_PHONE or None)
+    _init_session_db()
 
-    if not await client.is_user_authorized():
-        logger.error("Telegram 未授权，请先运行 login 命令")
-        await client.disconnect()
-        sys.exit(1)
-
-    me = await client.get_me()
-    logger.info(f"Telegram 客户端已连接: {me.first_name}")
-    return client
+    for attempt in range(1, retries + 1):
+        client = TelegramClient(
+            "code_crawler_session",
+            settings.TELEGRAM_API_ID,
+            settings.TELEGRAM_API_HASH,
+            device_model="CodeCrawler",
+            app_version="1.0.0",
+        )
+        try:
+            await client.start(phone=settings.TELEGRAM_PHONE or None)
+            if not await client.is_user_authorized():
+                logger.error("Telegram 未授权，请先运行 login 命令")
+                await client.disconnect()
+                sys.exit(1)
+            me = await client.get_me()
+            logger.info(f"Telegram 客户端已连接: {me.first_name}")
+            return client
+        except sqlite3.OperationalError as e:
+            await client.disconnect()
+            if "database is locked" in str(e) and attempt < retries:
+                wait = attempt * 2
+                logger.warning(f"Session 数据库被锁定，{wait} 秒后重试 ({attempt}/{retries})...")
+                await asyncio.sleep(wait)
+                continue
+            logger.error(f"无法连接 Telegram: {e}")
+            sys.exit(1)
+        except Exception as e:
+            await client.disconnect()
+            logger.error(f"无法连接 Telegram: {e}")
+            sys.exit(1)
 
 
 def main():
