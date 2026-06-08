@@ -1,6 +1,7 @@
-telethon>=1.38.0
-loguru>=0.7.3
-cryptg>=0.4.0
-
-# CockroachDB 同步（可选，如需同步到主数据库则安装）
-asyncpg>=0.30.0
+telethon==1.38.0
+loguru==0.7.3
+cryptg==0.4.0
+pydantic-settings==2.6.1
+asyncpg==0.30.0
+python-telegram-bot==21.10
+httpx==0.28.1

@@ -7,7 +7,7 @@ import asyncpg
 from loguru import logger
 
 from config import settings
-from storage import Storage
+from database import Storage
 
 
 class CockroachSync:

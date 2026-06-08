@@ -85,12 +85,24 @@ class Storage:
                 completed_at TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS bot_overrides (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_prefix TEXT NOT NULL,
+                override_bot_username TEXT NOT NULL,
+                is_active INTEGER DEFAULT 1,
+                created_at TEXT,
+                updated_at TEXT,
+                note TEXT,
+                UNIQUE(code_prefix)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_file_codes_code ON file_codes(code);
             CREATE INDEX IF NOT EXISTS idx_file_codes_bot ON file_codes(bot_username);
             CREATE INDEX IF NOT EXISTS idx_file_codes_exported ON file_codes(is_exported);
             CREATE INDEX IF NOT EXISTS idx_file_codes_verified ON file_codes(is_verified);
             CREATE INDEX IF NOT EXISTS idx_file_codes_resolved ON file_codes(is_resolved);
             CREATE INDEX IF NOT EXISTS idx_resolve_log_status ON resolve_log(status);
+            CREATE INDEX IF NOT EXISTS idx_bot_overrides_prefix ON bot_overrides(code_prefix);
         """)
         conn.commit()
 
@@ -133,6 +145,27 @@ class Storage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_resolve_log_status ON resolve_log(status)"
             )
+
+        existing_overrides = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='bot_overrides'"
+        ).fetchone()
+        if not existing_overrides:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bot_overrides (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code_prefix TEXT NOT NULL,
+                    override_bot_username TEXT NOT NULL,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    note TEXT,
+                    UNIQUE(code_prefix)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bot_overrides_prefix ON bot_overrides(code_prefix)"
+            )
+            logger.info("[Storage] 迁移: 创建 bot_overrides 表")
         conn.commit()
 
     def close(self):
@@ -501,3 +534,81 @@ class Storage:
         conn.execute("DELETE FROM resolve_log")
         conn.commit()
         logger.info("[Storage] 已清空所有文件码和解析记录")
+
+    # ─── Bot 覆盖规则管理 ─────────────────────────────────
+
+    def add_bot_override(self, code_prefix: str, override_bot_username: str,
+                         note: str = "") -> bool:
+        """添加 Bot 覆盖规则：以 code_prefix 开头的文件码使用 override_bot_username 解析"""
+        conn = self._conn
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            conn.execute(
+                """INSERT INTO bot_overrides (code_prefix, override_bot_username, is_active, created_at, note)
+                   VALUES (?, ?, 1, ?, ?)
+                   ON CONFLICT(code_prefix) DO UPDATE SET
+                   override_bot_username=excluded.override_bot_username,
+                   is_active=1,
+                   updated_at=excluded.created_at,
+                   note=excluded.note""",
+                (code_prefix, override_bot_username, now, note)
+            )
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception as e:
+            logger.error(f"[Storage] 添加 Bot 覆盖失败 {code_prefix}: {e}")
+            return False
+
+    def remove_bot_override(self, code_prefix: str) -> bool:
+        """删除 Bot 覆盖规则"""
+        conn = self._conn
+        try:
+            conn.execute("DELETE FROM bot_overrides WHERE code_prefix = ?", (code_prefix,))
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception as e:
+            logger.error(f"[Storage] 删除 Bot 覆盖失败 {code_prefix}: {e}")
+            return False
+
+    def toggle_bot_override(self, code_prefix: str) -> bool:
+        """切换 Bot 覆盖规则的启用/禁用状态"""
+        conn = self._conn
+        try:
+            conn.execute(
+                """UPDATE bot_overrides SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END,
+                   updated_at = ?
+                   WHERE code_prefix = ?""",
+                (datetime.now(timezone.utc).isoformat(), code_prefix)
+            )
+            conn.commit()
+            return conn.total_changes > 0
+        except Exception as e:
+            logger.error(f"[Storage] 切换 Bot 覆盖状态失败 {code_prefix}: {e}")
+            return False
+
+    def list_bot_overrides(self) -> list:
+        """列出所有 Bot 覆盖规则"""
+        conn = self._conn
+        rows = conn.execute(
+            "SELECT * FROM bot_overrides ORDER BY is_active DESC, created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_bot_override(self, code: str) -> dict | None:
+        """检查文件码是否匹配覆盖规则，返回匹配的覆盖规则（按前缀长度降序优先匹配最长前缀）"""
+        conn = self._conn
+        rows = conn.execute(
+            """SELECT * FROM bot_overrides
+               WHERE is_active = 1 AND ? LIKE (code_prefix || '%')
+               ORDER BY LENGTH(code_prefix) DESC
+               LIMIT 1""",
+            (code,)
+        ).fetchall()
+        if rows:
+            return dict(rows[0])
+        return None
+
+
+def get_db() -> Storage:
+    """获取数据库实例（工厂函数，匹配主项目风格）。"""
+    return Storage()

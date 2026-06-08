@@ -14,9 +14,9 @@ from telethon.tl.types import (
     Channel, Chat, Document, Message, MessageMediaDocument, MessageMediaPhoto, Photo,
 )
 
-from code_extractor import extract_codes_from_message
 from config import settings
-from storage import Storage
+from database import Storage
+from utils.code_extractor import extract_codes_from_message
 
 
 class CodeCrawler:

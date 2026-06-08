@@ -16,9 +16,9 @@ from telethon.tl.types import (
 )
 from telethon.utils import pack_bot_file_id
 
-from code_extractor import extract_bot_username
 from config import settings
-from storage import Storage
+from database import Storage
+from utils.code_extractor import extract_bot_username
 
 _SETTLE_WAIT = 5
 _INITIAL_SETTLE_WAIT = 10
@@ -35,6 +35,7 @@ class CodeResolver:
         self._bot_exchange: dict[str, dict] = {}
         self._media_buffers: dict[str, dict] = {}
         self._cache_locks: dict[str, asyncio.Lock] = {}
+        self._cf_api = None  # 延迟初始化 CloudflareOverrideAPI
 
     @property
     def _event_loop(self):
@@ -90,8 +91,25 @@ class CodeResolver:
         if self._db_pool:
             await self._db_pool.close()
             self._db_pool = None
+        if self._cf_api:
+            await self._cf_api.close()
+            self._cf_api = None
         for bot in list(self._bot_exchange.keys()):
             self._cleanup_exchange(bot)
+
+    # ─── 初始化 Cloudflare API ──────────────────────────
+
+    def _init_cf_api(self):
+        """延迟初始化 CloudflareOverrideAPI（仅在配置了相关参数时）"""
+        if self._cf_api is not None:
+            return
+        if settings.CLOUDFLARE_API_URL and settings.CLOUDFLARE_AUTH_TOKEN:
+            from utils.cloudflare_api import CloudflareOverrideAPI
+            self._cf_api = CloudflareOverrideAPI(
+                base_url=settings.CLOUDFLARE_API_URL,
+                auth_token=settings.CLOUDFLARE_AUTH_TOKEN,
+            )
+            logger.info("[Resolver] Cloudflare 覆盖规则 API 已启用")
 
     # ─── 事件处理器 ──────────────────────────────────────
 
@@ -364,6 +382,7 @@ class CodeResolver:
         logger.info(f"[Resolver] 本轮取到 {len(codes)} 个待解析码")
 
         self._register_handlers()
+        self._init_cf_api()
         db_ok = await self._init_db_pool()
         resolved_count = 0
 
@@ -381,6 +400,26 @@ class CodeResolver:
         code = code_row["code"]
         bot_username = code_row.get("bot_username", "")
         code_id = code_row["id"]
+
+        # ── 检查 Bot 覆盖规则（优先 Cloudflare D1，回退本地 SQLite）──
+        override = None
+        if self._cf_api is not None:
+            try:
+                override = await self._cf_api.match_override(code)
+            except Exception as e:
+                logger.debug(f"[Resolver] Cloudflare API 覆盖查询异常: {e}")
+
+        if override is None:
+            override = self.storage.get_bot_override(code)
+
+        if override:
+            original_bot = bot_username
+            bot_username = override["override_bot_username"]
+            logger.info(
+                f"[Resolver] 覆盖规则匹配: {code} "
+                f"原 bot=@{original_bot} -> 新 bot=@{bot_username} "
+                f"(前缀匹配: {override['code_prefix']})"
+            )
 
         if not bot_username:
             bot_username = extract_bot_username(code)
