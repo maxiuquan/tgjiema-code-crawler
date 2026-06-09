@@ -96,6 +96,11 @@ class Storage:
                 UNIQUE(code_prefix)
             );
 
+            CREATE TABLE IF NOT EXISTS mapped_codes (
+                code TEXT PRIMARY KEY,
+                mapped_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_file_codes_code ON file_codes(code);
             CREATE INDEX IF NOT EXISTS idx_file_codes_bot ON file_codes(bot_username);
             CREATE INDEX IF NOT EXISTS idx_file_codes_exported ON file_codes(is_exported);
@@ -324,6 +329,26 @@ class Storage:
             """INSERT INTO resolve_log (code, status, error_message, completed_at, started_at)
                VALUES ((SELECT code FROM file_codes WHERE id=?), 'failed', ?, ?, ?)""",
             (code_id, error, now, now)
+        )
+        conn.commit()
+
+    # ── 映射缓存（本地 SQLite，省 CRDB has_mapping 查询）────────
+
+    def is_code_mapped(self, code: str) -> bool:
+        """检查本地 SQLite 中是否已有外部码映射记录。"""
+        conn = self._conn
+        row = conn.execute(
+            "SELECT 1 FROM mapped_codes WHERE code = ?", (code,)
+        ).fetchone()
+        return row is not None
+
+    def mark_code_mapped(self, code: str):
+        """在本地 SQLite 中记录外部码已映射。"""
+        conn = self._conn
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT OR REPLACE INTO mapped_codes (code, mapped_at) VALUES (?, ?)",
+            (code, now),
         )
         conn.commit()
 
