@@ -16,7 +16,6 @@ from config import settings
 from database import Storage
 from services.crawler import CodeCrawler
 from services.resolver import CodeResolver
-from services.cockroach_sync import CockroachSync
 from services.admin_bot import AdminBot
 
 logging_configured = False
@@ -126,16 +125,12 @@ async def cmd_daemon(args):
     storage = Storage()
     crawler = CodeCrawler(client, storage)
     resolver = CodeResolver(client, storage)
-    syncer = CockroachSync(storage)
 
     global _crawler_instance, _resolver_instance
     _crawler_instance = crawler
     _resolver_instance = resolver
 
     running = True
-    last_resolved_sync_time = 0.0
-    SYNC_INTERVAL_HOURS = 6
-    SYNC_INTERVAL_SECONDS = SYNC_INTERVAL_HOURS * 3600
 
     def _signal_handler():
         nonlocal running
@@ -145,7 +140,7 @@ async def cmd_daemon(args):
         resolver.stop()
 
     _setup_signal_handlers(_signal_handler)
-    logger.info("[Daemon] 启动全自动模式: 爬取已加入频道 → 解析 → 同步 交替循环")
+    logger.info("[Daemon] 启动全自动模式: 爬取已加入频道 → 解析（上传+映射） 交替循环")
 
     cycle = 0
     while running:
@@ -161,37 +156,13 @@ async def cmd_daemon(args):
             except Exception as e:
                 logger.error(f"[Daemon] 爬取阶段失败: {e}")
 
-        # 2. 解析待处理文件码
-        logger.info("[Daemon] 阶段2: 解析待处理文件码...")
+        # 2. 解析待处理文件码（内部通过 up_bot 上传 + CodeMapper 写映射到 CockroachDB）
+        logger.info("[Daemon] 阶段2: 解析待处理文件码（上传+映射）...")
         try:
             resolved = await resolver.resolve_next_batch(batch_size=args.resolve_batch)
             logger.info(f"[Daemon] 解析完成: 成功 {resolved} 个")
         except Exception as e:
             logger.error(f"[Daemon] 解析阶段失败: {e}")
-
-        # 3. 同步到 CockroachDB（基础码同步每轮都执行，已解析记录每6小时间步一次）
-        if settings.COCKROACHDB_URL:
-            now = asyncio.get_event_loop().time()
-            should_sync_resolved = (now - last_resolved_sync_time) >= SYNC_INTERVAL_SECONDS
-
-            if should_sync_resolved:
-                logger.info(f"[Daemon] 阶段3: 同步已解析记录到 CockroachDB（{SYNC_INTERVAL_HOURS}小时间隔）...")
-                try:
-                    synced = await syncer.sync_all_resolved(batch_size=200)
-                    logger.info(f"[Daemon] 已解析记录同步完成: {synced} 条")
-                except Exception as e:
-                    logger.error(f"[Daemon] 同步已解析记录失败: {e}")
-                last_resolved_sync_time = now
-            else:
-                remaining = SYNC_INTERVAL_SECONDS - (now - last_resolved_sync_time)
-                logger.debug(f"[Daemon] 阶段3: 距下次已解析记录同步还有 {remaining/3600:.1f} 小时，跳过")
-
-            logger.info("[Daemon] 阶段3: 同步基础文件码到 CockroachDB...")
-            try:
-                synced = await syncer.sync_all(batch_size=1000)
-                logger.info(f"[Daemon] 基础码同步完成: {synced} 个")
-            except Exception as e:
-                logger.error(f"[Daemon] 基础码同步失败: {e}")
 
         overall = storage.get_crawl_stats()
         resolve_st = storage.get_resolve_stats()
@@ -210,7 +181,6 @@ async def cmd_daemon(args):
                 await asyncio.sleep(1)
 
     await resolver.close()
-    await syncer.close()
     await client.disconnect()
     storage.close()
     logger.info("[Daemon] 全自动模式已停止")
@@ -301,6 +271,7 @@ async def cmd_channels(args):
 
 async def cmd_sync(args):
     configure_logging()
+    from services.cockroach_sync import CockroachSync
     storage = Storage()
     syncer = CockroachSync(storage)
     try:

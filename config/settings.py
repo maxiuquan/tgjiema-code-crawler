@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 
 from pydantic_settings import BaseSettings
 
@@ -17,9 +17,6 @@ class Settings(BaseSettings):
     SEARCH_KEYWORDS: str = ""
     SEARCH_LIMIT: int = 50
 
-    # ── 存储频道 ────────────────────────────────────────
-    STORAGE_CHANNEL_ID: int = 0
-
     # ── 解析器配置 ──────────────────────────────────────
     RESOLVE_TIMEOUT_SECONDS: int = 30
     RESOLVE_BATCH_SIZE: int = 5
@@ -30,6 +27,13 @@ class Settings(BaseSettings):
     # ── 守护模式配置 ────────────────────────────────────
     DAEMON_CRAWL_FIRST: bool = True
     DAEMON_CYCLE_INTERVAL: int = 60
+
+    # ── 主系统 Bot 用户名 ───────────────────────────────
+    UPLOAD_BOT_USERNAME: str = ""
+    DECODER_BOT_USERNAME: str = ""
+
+    # ── 文件码前缀（与主系统一致） ───────────────────────
+    FILE_CODE_PREFIX: str = "tgwenjian"
 
     # ── CockroachDB ─────────────────────────────────────
     COCKROACHDB_URL: str = ""
@@ -42,17 +46,12 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     # ── 管理员 Bot 配置 ──────────────────────────────────
-    # 独立 Bot 的 Token（从 @BotFather 获取）
     TELEGRAM_BOT_TOKEN: str = ""
-    # 允许使用管理命令的用户 ID 列表（Telegram 数字 ID）
     ADMIN_USER_IDS: List[int] = []
-    # 是否启用管理员 Bot 监听模式
     ADMIN_BOT_ENABLED: bool = False
 
     # ── Cloudflare Worker API（覆盖规则存储）────────────
-    # Worker 部署后的 URL，如 https://bot-override-api.your-name.workers.dev
     CLOUDFLARE_API_URL: str = ""
-    # Bearer Token，与 Worker 中的 AUTH_TOKEN secret 一致
     CLOUDFLARE_AUTH_TOKEN: str = ""
 
     # ── 目标文件扩展名 ──────────────────────────────────
