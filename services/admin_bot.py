@@ -1,13 +1,10 @@
 """管理员 Bot 服务（独立 Telegram Bot）
-使用 Bot Token 运行，通过 Cloudflare Worker API 管理 Bot 解码覆盖规则，
+使用 Bot Token 运行，通过本地 SQLite 管理 Bot 解码覆盖规则，
 并支持通过 Telegram 命令导出文件码 TXT。
 仅响应 ADMIN_USER_IDS 中配置的授权用户。
 
 启动方式:
   python run.py admin-bot
-
-依赖:
-  需要先部署 Cloudflare Worker (worker/) 并设置 CLOUDFLARE_API_URL / CLOUDFLARE_AUTH_TOKEN
 """
 
 import os
@@ -18,20 +15,18 @@ from typing import Optional
 from loguru import logger
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, filters,
+    Application, CommandHandler, ContextTypes,
 )
 
 from config import settings
 from database import Storage
-from utils.cloudflare_api import CloudflareOverrideAPI
 
 
 class AdminBot:
-    """独立的管理员 Bot — 基于 python-telegram-bot，数据存储在 Cloudflare D1"""
+    """独立的管理员 Bot — 基于 python-telegram-bot，数据存储在本地 SQLite"""
 
     def __init__(self, storage: Optional[Storage] = None):
         self._app: Optional[Application] = None
-        self._api: Optional[CloudflareOverrideAPI] = None
         self._storage: Optional[Storage] = storage
 
     # ─── 启动 / 停止 ──────────────────────────────────
@@ -42,29 +37,12 @@ class AdminBot:
             logger.error("[AdminBot] TELEGRAM_BOT_TOKEN 未配置")
             return
 
-        if not settings.CLOUDFLARE_API_URL or not settings.CLOUDFLARE_AUTH_TOKEN:
-            logger.error("[AdminBot] CLOUDFLARE_API_URL / CLOUDFLARE_AUTH_TOKEN 未配置")
-            return
-
         if not settings.ADMIN_USER_IDS:
             logger.error("[AdminBot] ADMIN_USER_IDS 未配置")
             return
 
-        # 初始化 API 客户端
-        self._api = CloudflareOverrideAPI(
-            base_url=settings.CLOUDFLARE_API_URL,
-            auth_token=settings.CLOUDFLARE_AUTH_TOKEN,
-        )
-
-        # 健康检查
-        if not await self._api.health_check():
-            logger.error(
-                f"[AdminBot] Cloudflare API 无法连接: {settings.CLOUDFLARE_API_URL}"
-            )
-            await self._api.close()
-            return
-
-        logger.info(f"[AdminBot] Cloudflare API 连接成功: {settings.CLOUDFLARE_API_URL}")
+        if not self._storage:
+            self._storage = Storage()
 
         # 构建 Application
         self._app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
@@ -87,8 +65,8 @@ class AdminBot:
         """停止 Bot"""
         if self._app:
             await self._app.stop()
-        if self._api:
-            await self._api.close()
+        if self._storage:
+            self._storage.close()
         logger.info("[AdminBot] Bot 已停止")
 
     # ─── 鉴权检查 ──────────────────────────────────────
@@ -138,7 +116,7 @@ class AdminBot:
             return
 
         prefix, bot, note = m.group(1), m.group(2), m.group(3).strip()
-        ok = await self._api.add_override(prefix, bot, note)
+        ok = self._storage.add_bot_override(prefix, bot, note)
         if ok:
             await update.message.reply_text(
                 f"已添加覆盖规则:\n"
@@ -166,7 +144,7 @@ class AdminBot:
             return
 
         prefix = m.group(1)
-        ok = await self._api.remove_override(prefix)
+        ok = self._storage.remove_bot_override(prefix)
         if ok:
             await update.message.reply_text(f"已删除覆盖规则: `{prefix}`", parse_mode="Markdown")
         else:
@@ -187,21 +165,23 @@ class AdminBot:
             return
 
         prefix = m.group(1)
-        result = await self._api.toggle_override(prefix)
-        if result is None:
-            await update.message.reply_text(f"未找到覆盖规则: `{prefix}`", parse_mode="Markdown")
-        else:
-            status = "启用" if result else "禁用"
+        ok = self._storage.toggle_bot_override(prefix)
+        if ok:
+            overrides = self._storage.list_bot_overrides()
+            target = next((o for o in overrides if o["code_prefix"] == prefix), None)
+            status = "启用" if (target and target["is_active"]) else "禁用"
             await update.message.reply_text(
                 f"覆盖规则 `{prefix}` 已{status}", parse_mode="Markdown"
             )
+        else:
+            await update.message.reply_text(f"未找到覆盖规则: `{prefix}`")
 
     # ─── /list_overrides ──────────────────────────────
 
     async def _cmd_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self._is_authorized(update):
             return
-        overrides = await self._api.list_overrides()
+        overrides = self._storage.list_bot_overrides()
         if not overrides:
             await update.message.reply_text(
                 "当前没有覆盖规则。\n\n使用 `/add_override <前缀> <bot用户名>` 添加。",
@@ -228,29 +208,24 @@ class AdminBot:
             await update.message.reply_text("存储未初始化，请联系管理员检查配置。")
             return
 
-        # 先发送一条提示消息
         status_msg = await update.message.reply_text("正在导出文件码，请稍候...")
 
         try:
-            # 导出纯码模式 TXT
             filepath = self._storage.export_to_txt(resolved_only=True, include_meta=False)
             if not filepath or not os.path.exists(filepath):
                 await status_msg.edit_text("没有已解析的文件码需要导出。")
                 return
 
-            # 统计码数量
             with open(filepath, "r", encoding="utf-8") as f:
                 lines = [line.strip() for line in f if line.strip()]
             code_count = len(lines)
 
-            # 发送 TXT 文件
             await update.message.reply_document(
                 document=open(filepath, "rb"),
                 filename=os.path.basename(filepath),
                 caption=f"文件码导出 — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n共 {code_count} 个码",
             )
 
-            # 清理提示消息
             await status_msg.delete()
             logger.info(f"[AdminBot] 管理员 {update.effective_user.id} 导出了 {code_count} 个文件码")
 

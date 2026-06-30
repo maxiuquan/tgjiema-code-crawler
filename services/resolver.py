@@ -38,7 +38,6 @@ class CodeResolver:
         self._bot_exchange: dict[str, dict] = {}
         self._media_buffers: dict[str, dict] = {}
         self._cache_locks: dict[str, asyncio.Lock] = {}
-        self._cf_api = None
         self._upbot: object = None  # UpbotUploader, 延迟初始化
         self._mapper: object = None  # CodeMapper, 延迟初始化
 
@@ -95,24 +94,8 @@ class CodeResolver:
         if self._db_pool:
             await self._db_pool.close()
             self._db_pool = None
-        if self._cf_api:
-            await self._cf_api.close()
-            self._cf_api = None
         for bot in list(self._bot_exchange.keys()):
             self._cleanup_exchange(bot)
-
-    # ─── 初始化 Cloudflare API ──────────────────────────
-
-    def _init_cf_api(self):
-        if self._cf_api is not None:
-            return
-        if settings.CLOUDFLARE_API_URL and settings.CLOUDFLARE_AUTH_TOKEN:
-            from utils.cloudflare_api import CloudflareOverrideAPI
-            self._cf_api = CloudflareOverrideAPI(
-                base_url=settings.CLOUDFLARE_API_URL,
-                auth_token=settings.CLOUDFLARE_AUTH_TOKEN,
-            )
-            logger.info("[Resolver] Cloudflare 覆盖规则 API 已启用")
 
     # ─── 事件处理器 ──────────────────────────────────────
 
@@ -380,7 +363,6 @@ class CodeResolver:
         logger.info(f"[Resolver] 本轮取到 {len(codes)} 个待解析码")
 
         self._register_handlers()
-        self._init_cf_api()
         self._init_upbot()
         db_ok = await self._init_db_pool()
         self._init_mapper()
@@ -402,16 +384,8 @@ class CodeResolver:
         bot_username = code_row.get("bot_username", "")
         code_id = code_row["id"]
 
-        # ── 检查 Bot 覆盖规则 ──
-        override = None
-        if self._cf_api is not None:
-            try:
-                override = await self._cf_api.match_override(code)
-            except Exception as e:
-                logger.debug(f"[Resolver] Cloudflare API 覆盖查询异常: {e}")
-
-        if override is None:
-            override = self.storage.get_bot_override(code)
+        # ─── 检查 Bot 覆盖规则（本地 SQLite）───
+        override = self.storage.get_bot_override(code)
 
         if override:
             original_bot = bot_username
@@ -637,8 +611,19 @@ class CodeResolver:
     # ─── 翻页循环 ──
 
     async def _pagination_loop(self, bot_username: str):
-        max_pages = 10
-        for _ in range(max_pages):
+        started_at = asyncio.get_event_loop().time()
+        timeout = settings.RESOLVE_PAGINATION_TIMEOUT
+
+        while True:
+            if timeout > 0:
+                elapsed = asyncio.get_event_loop().time() - started_at
+                if elapsed > timeout:
+                    logger.warning(
+                        f"[Resolver] @{bot_username} 翻页总耗时 {elapsed:.0f}s，"
+                        f"超过上限 {timeout}s，强制终止翻页"
+                    )
+                    break
+
             exchange = self._bot_exchange.get(bot_username)
             if not exchange:
                 break

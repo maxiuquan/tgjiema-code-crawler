@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List
 
 from loguru import logger
 from pydantic import model_validator
@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     RESOLVE_INTERVAL_SECONDS: int = 10
     RESOLVE_MAX_RETRIES: int = 3
     RESOLVE_DELAY_BETWEEN_CODES: float = 3.0
+    RESOLVE_PAGINATION_TIMEOUT: int = 600
 
     # ── 守护模式配置 ────────────────────────────────────
     DAEMON_CRAWL_FIRST: bool = True
@@ -48,16 +49,12 @@ class Settings(BaseSettings):
     # ── 日志 ────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"
 
-    # ── 管理员 Bot 配置 ──────────────────────────────────
+    # ─── 管理员 Bot 配置 ──────────────────────────────────
     TELEGRAM_BOT_TOKEN: str = ""
     ADMIN_USER_IDS: List[int] = []
     ADMIN_BOT_ENABLED: bool = False
 
-    # ── Cloudflare Worker API（覆盖规则存储）────────────
-    CLOUDFLARE_API_URL: str = ""
-    CLOUDFLARE_AUTH_TOKEN: str = ""
-
-    # ── 目标文件扩展名 ──────────────────────────────────
+    # ─── 目标文件扩展名 ──────────────────────────────────
     TARGET_FILE_EXTENSIONS: List[str] = [
         "zip", "rar", "7z", "tar", "gz",
         "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",

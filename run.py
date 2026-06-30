@@ -369,16 +369,13 @@ async def cmd_override_list(args):
 
 
 async def cmd_admin_bot(args):
-    """启动管理员 Bot（独立 Bot Token + Cloudflare D1）"""
+    """启动管理员 Bot（独立 Bot Token + 本地 SQLite）"""
     configure_logging()
     if not settings.TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN 未配置，请在 .env 中设置 Bot Token")
         return
     if not settings.ADMIN_USER_IDS:
         logger.error("ADMIN_USER_IDS 未配置，请在 .env 中设置授权用户 ID 列表")
-        return
-    if not settings.CLOUDFLARE_API_URL or not settings.CLOUDFLARE_AUTH_TOKEN:
-        logger.error("CLOUDFLARE_API_URL / CLOUDFLARE_AUTH_TOKEN 未配置，请在 .env 中设置")
         return
 
     storage = Storage()
