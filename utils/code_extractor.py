@@ -77,9 +77,40 @@ def is_external_code(text: str) -> bool:
 
 
 def extract_codes_from_message(text: str) -> List[Tuple[str, str, int]]:
+    """从消息文本中提取所有文件码。
+
+    支持多种格式:
+      - BotName_bot:code1234
+      - BotName_bot code1234 (空格分隔)
+      - BotName_botcode1234 (紧凑粘连)
+      - code1234:BotName_bot (反序)
+      - 同一消息中多个码（空格、换行、中文分隔均可）
+    """
     codes = []
     seen = set()
     structured_code_parts: set = set()
+
+    # ─── 将全文 + 逐行分别提取，确保换行分隔的多码不遗漏 ───
+    text_variants = [text]
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    if len(lines) > 1:
+        text_variants.extend(lines)
+
+    for variant in text_variants:
+        _extract_from_single_text(variant, codes, seen, structured_code_parts)
+
+    # ─── 按置信度降序排列 ───
+    codes.sort(key=lambda x: x[2], reverse=True)
+    return codes
+
+
+def _extract_from_single_text(
+    text: str,
+    codes: List[Tuple[str, str, int]],
+    seen: set,
+    structured_code_parts: set,
+):
+    """从单个文本片段中提取文件码（内部辅助函数）。"""
 
     for match in _CODE_WITH_BOT.finditer(text):
         bot = match.group("bot") or match.group("bot2")
@@ -122,6 +153,7 @@ def extract_codes_from_message(text: str) -> List[Tuple[str, str, int]]:
                 codes.append((normalized, bot, 70))
                 structured_code_parts.add(code)
 
+    # ─── 空格/逗号/分号分隔的 token 级扫描 ───
     seen_bots = set()
     tokens = re.split(r'[\s,;]+', text)
     for i, token in enumerate(tokens):
@@ -145,6 +177,7 @@ def extract_codes_from_message(text: str) -> List[Tuple[str, str, int]]:
                     codes.append((normalized, token, 75))
                 break
 
+    # ─── 孤儿 token 关联已知 bot ───
     all_bot_mentions: List[str] = []
     for token in re.split(r'[\s,;:_]+', text):
         token = token.strip().lstrip('@')
@@ -170,8 +203,6 @@ def extract_codes_from_message(text: str) -> List[Tuple[str, str, int]]:
                 if normalized not in seen:
                     seen.add(normalized)
                     codes.append((normalized, bot, 60))
-
-    return codes
 
 
 def extract_codes_from_caption(text: str) -> List[Tuple[str, str, int]]:

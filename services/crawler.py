@@ -25,6 +25,7 @@ class CodeCrawler:
         self.storage = storage
         self._running = False
         self._processed_messages = set()
+        self._max_processed_messages = 100000  # 最大缓存条数，超过则清理
 
     async def login_check(self) -> bool:
         if not await self.client.is_user_authorized():
@@ -122,6 +123,11 @@ class CodeCrawler:
         msg_key = f"{channel_id}_{msg_id}"
         if msg_key in self._processed_messages:
             return 0
+
+        # 定期清理，防止内存无限增长
+        if len(self._processed_messages) > self._max_processed_messages:
+            self._processed_messages = set(list(self._processed_messages)[-50000:])
+
         self._processed_messages.add(msg_key)
 
         found_count = 0
@@ -135,7 +141,7 @@ class CodeCrawler:
             all_texts.append(caption)
 
         file_type = None
-        file_name = None
+        file_name = ""
         file_size = 0
 
         if message.media:
@@ -153,6 +159,11 @@ class CodeCrawler:
                 continue
 
             codes = extract_codes_from_message(msg_text)
+            if len(codes) > 1:
+                logger.info(
+                    f"[Crawl] 消息含 {len(codes)} 个文件码 (channel={channel_title}, "
+                    f"msg_id={msg_id}): {[c[0] for c in codes]}"
+                )
             for code, bot_username, confidence in codes:
                 if not self.storage.code_exists(code):
                     ok = self.storage.save_code(

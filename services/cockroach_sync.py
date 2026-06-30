@@ -1,16 +1,7 @@
-"""CockroachSync — 本地 SQLite → CockroachDB 同步（RU 优化版）
-
-RU 优化要点：
-- 单次连接批量处理全部记录（不再逐条 acquire/release）
-- INSERT ... ON CONFLICT DO NOTHING 替代 SELECT + INSERT（省 1 次往返/条）
-- 批量写入 code_bot_mapping（1 次事务内完成）
-- 移除逐条 sleep(0.1)，改为批量提交后短暂停顿
-- 支持共享外部连接池（避免多池占用）
-"""
-
+import asyncio
 import json
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import asyncpg
 from loguru import logger
@@ -20,25 +11,22 @@ from database import Storage
 
 
 class CockroachSync:
-    def __init__(self, storage: Storage, db_pool: Optional[asyncpg.Pool] = None):
+    def __init__(self, storage: Storage):
         self.storage = storage
-        self._pool: Optional[asyncpg.Pool] = db_pool  # 支持共享外部连接池
-        self._owns_pool = False
+        self._pool: Optional[asyncpg.Pool] = None
+        self._last_resolved_sync: float = 0
 
     async def connect(self) -> bool:
         if not settings.COCKROACHDB_URL:
             logger.warning("[Sync] COCKROACHDB_URL 未配置，跳过同步")
             return False
-        if self._pool and not getattr(self._pool, "_closed", False):
-            return True
         try:
             self._pool = await asyncpg.create_pool(
                 settings.COCKROACHDB_URL,
                 min_size=1,
-                max_size=2,  # 从 3 降到 2，减少空闲连接 RU
+                max_size=2,
                 statement_cache_size=0,
             )
-            self._owns_pool = True
             logger.info("[Sync] 已连接到 CockroachDB")
             return True
         except Exception as e:
@@ -46,91 +34,69 @@ class CockroachSync:
             return False
 
     async def close(self):
-        if self._owns_pool and self._pool:
+        if self._pool:
             await self._pool.close()
-            self._pool = None
-
-    # ── 核心：批量同步文件码 ──────────────────────────────────
 
     async def sync_codes(self, limit: int = 500) -> int:
-        """批量同步未导出的文件码到 CockroachDB。
-
-        RU 优化：单连接批量 INSERT ... ON CONFLICT DO NOTHING，
-        原来 4 次往返/条 → 现在每批只做 2 次批量查询。
-        """
-        if not self._pool or getattr(self._pool, "_closed", False):
+        if not self._pool or getattr(self._pool, '_closed', False):
             ok = await self.connect()
             if not ok:
                 return 0
 
         codes = self.storage.get_uneported_codes(limit=limit)
         if not codes:
+            logger.info("[Sync] 没有新码需要同步")
             return 0
 
         now = datetime.now(timezone.utc).isoformat()
         synced = 0
+        exported_ids = []
 
-        try:
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
-                    # 1) 批量插入 file_records（单条 SQL，每个 code 一行）
-                    file_values = []
-                    file_params = []
-                    for i, code_row in enumerate(codes):
-                        code = code_row["code"]
-                        file_values.append(
-                            f"(${i * 8 + 1}, ${i * 8 + 2}, ${i * 8 + 3}, "
-                            f"${i * 8 + 4}, ${i * 8 + 5}, ${i * 8 + 6}, "
-                            f"${i * 8 + 7}, ${i * 8 + 8})"
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for code_row in codes:
+                    code = code_row["code"]
+                    bot_username = code_row.get("bot_username", "")
+                    code_id = code_row.get("id")
+
+                    try:
+                        # 检查 file_records 是否已存在
+                        existing = await conn.fetchval(
+                            "SELECT 1 FROM file_records WHERE file_code = $1", code
                         )
-                        file_params.extend([
-                            code, 0, 0, 0,
-                            json.dumps({"external": True}),
-                            "active", 0, now,
-                        ])
+                        if not existing:
+                            await conn.execute(
+                                """INSERT INTO file_records
+                                   (file_code, uploader_id, primary_channel_id, primary_channel_msg_id,
+                                    backup_channel_msg_ids, batch_msg_ids, batch_file_meta, file_ids,
+                                    file_types, status, request_count, create_time, expire_time)
+                                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+                                code, 0, 0, 0, None, None, None, None,
+                                json.dumps({"external": True}),
+                                "active", 0, now, None,
+                            )
 
-                    if file_values:
-                        await conn.execute(
-                            f"""INSERT INTO file_records
-                                (file_code, uploader_id, primary_channel_id,
-                                 primary_channel_msg_id, file_types,
-                                 status, request_count, create_time)
-                                VALUES {','.join(file_values)}
-                                ON CONFLICT (file_code) DO NOTHING""",
-                            *file_params,
-                        )
+                            # 检查 code_bot_mapping 是否已存在
+                            existing_cb = await conn.fetchval(
+                                "SELECT 1 FROM code_bot_mapping WHERE code_prefix = $1", code
+                            )
+                            if not existing_cb:
+                                await conn.execute(
+                                    """INSERT INTO code_bot_mapping (code_prefix, bot_username, created_at)
+                                       VALUES ($1, $2, $3)""",
+                                    code, bot_username, now,
+                                )
 
-                    # 2) 批量插入 code_bot_mapping（去重）
-                    bot_values = []
-                    bot_params = []
-                    for i, code_row in enumerate(codes):
-                        code = code_row["code"]
-                        bot_username = code_row.get("bot_username", "")
-                        if not bot_username:
-                            continue
-                        idx = len(bot_values)
-                        bot_values.append(f"(${idx * 3 + 1}, ${idx * 3 + 2}, ${idx * 3 + 3})")
-                        bot_params.extend([code, bot_username, now])
+                        exported_ids.append(code_id) if code_id else None
+                        synced += 1
 
-                    if bot_values:
-                        await conn.execute(
-                            f"""INSERT INTO code_bot_mapping (code, bot_username, created_at)
-                                VALUES {','.join(bot_values)}
-                                ON CONFLICT (code) DO NOTHING""",
-                            *bot_params,
-                        )
+                    except Exception as e:
+                        logger.error(f"[Sync] 同步码 {code} 失败: {e}")
 
-            # 3) 标记本地已导出
-            code_ids = [c["id"] for c in codes if c.get("id")]
-            if code_ids:
-                self.storage.mark_exported(code_ids)
+        if exported_ids:
+            self.storage.mark_exported(exported_ids)
 
-            synced = len(codes)
-            logger.info(f"[Sync] 批量同步完成: {synced} 个文件码")
-
-        except Exception as e:
-            logger.error(f"[Sync] 批量同步失败: {e}")
-
+        logger.info(f"[Sync] 同步完成: 已同步 {synced} 个文件码到 CockroachDB")
         return synced
 
     async def sync_all(self, batch_size: int = 500) -> int:
@@ -142,11 +108,8 @@ class CockroachSync:
                 break
         return total
 
-    # ── 批量同步已解析记录 ────────────────────────────────────
-
     async def sync_resolved_records(self, limit: int = 200) -> int:
-        """批量同步已解析（有存储位置）的记录到 CockroachDB。"""
-        if not self._pool or getattr(self._pool, "_closed", False):
+        if not self._pool or getattr(self._pool, '_closed', False):
             ok = await self.connect()
             if not ok:
                 return 0
@@ -155,78 +118,74 @@ class CockroachSync:
         if not records:
             return 0
 
-        now = datetime.now(timezone.utc).isoformat()
         synced = 0
+        synced_ids = []
 
-        try:
-            async with self._pool.acquire() as conn:
-                async with conn.transaction():
-                    # 1) 批量 INSERT/UPDATE file_records
-                    file_values = []
-                    file_params = []
-                    for i, row in enumerate(records):
-                        code = row["code"]
-                        storage_channel_id = row.get("storage_channel_id", 0) or 0
-                        storage_msg_id = row.get("storage_msg_id", 0) or 0
-                        batch_msg_ids = row.get("storage_batch_msg_ids", "") or ""
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                for row in records:
+                    code = row["code"]
+                    bot_username = row.get("bot_username", "")
+                    storage_channel_id = row.get("storage_channel_id", 0) or 0
+                    storage_msg_id = row.get("storage_msg_id", 0) or 0
+                    batch_msg_ids = row.get("storage_batch_msg_ids", "") or ""
+                    row_id = row.get("id")
 
-                        file_values.append(
-                            f"(${i * 9 + 1}, ${i * 9 + 2}, ${i * 9 + 3}, "
-                            f"${i * 9 + 4}, ${i * 9 + 5}, ${i * 9 + 6}, "
-                            f"${i * 9 + 7}, ${i * 9 + 8}, ${i * 9 + 9})"
-                        )
-                        file_params.extend([
-                            code, 0, storage_channel_id, storage_msg_id,
-                            batch_msg_ids,
-                            json.dumps({"external": True}),
-                            "active", 0, now,
-                        ])
-
-                    if file_values:
-                        await conn.execute(
-                            f"""INSERT INTO file_records
-                                (file_code, uploader_id, primary_channel_id,
-                                 primary_channel_msg_id, batch_msg_ids,
-                                 file_types, status, request_count, create_time)
-                                VALUES {','.join(file_values)}
-                                ON CONFLICT (file_code) DO UPDATE SET
-                                    primary_channel_id = EXCLUDED.primary_channel_id,
-                                    primary_channel_msg_id = EXCLUDED.primary_channel_msg_id,
-                                    batch_msg_ids = EXCLUDED.batch_msg_ids,
-                                    status = 'active'""",
-                            *file_params,
+                    try:
+                        now = datetime.now(timezone.utc).isoformat()
+                        existing = await conn.fetchval(
+                            "SELECT 1 FROM file_records WHERE file_code = $1", code
                         )
 
-                    # 2) 批量插入 code_bot_mapping
-                    bot_values = []
-                    bot_params = []
-                    for row in records:
-                        bot_username = row.get("bot_username", "")
-                        if not bot_username:
-                            continue
-                        idx = len(bot_values)
-                        bot_values.append(f"(${idx * 3 + 1}, ${idx * 3 + 2}, ${idx * 3 + 3})")
-                        bot_params.extend([row["code"], bot_username, now])
+                        if existing:
+                            await conn.execute(
+                                """UPDATE file_records SET
+                                   primary_channel_id = $1,
+                                   primary_channel_msg_id = $2,
+                                   batch_msg_ids = $3,
+                                   status = 'active'
+                                   WHERE file_code = $4""",
+                                storage_channel_id,
+                                storage_msg_id,
+                                batch_msg_ids,
+                                code,
+                            )
+                        else:
+                            await conn.execute(
+                                """INSERT INTO file_records
+                                   (file_code, uploader_id, primary_channel_id, primary_channel_msg_id,
+                                    backup_channel_msg_ids, batch_msg_ids, batch_file_meta, file_ids,
+                                    file_types, status, request_count, create_time, expire_time)
+                                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)""",
+                                code, 0, storage_channel_id, storage_msg_id,
+                                None, batch_msg_ids, None, None,
+                                json.dumps({"external": True}),
+                                "active", 0, now, None,
+                            )
 
-                    if bot_values:
-                        await conn.execute(
-                            f"""INSERT INTO code_bot_mapping (code, bot_username, created_at)
-                                VALUES {','.join(bot_values)}
-                                ON CONFLICT (code) DO NOTHING""",
-                            *bot_params,
+                        # 检查 code_bot_mapping 是否已存在
+                        existing_cb = await conn.fetchval(
+                            "SELECT 1 FROM code_bot_mapping WHERE code_prefix = $1", code
                         )
+                        if not existing_cb:
+                            await conn.execute(
+                                """INSERT INTO code_bot_mapping (code_prefix, bot_username, created_at)
+                                   VALUES ($1, $2, $3)""",
+                                code, bot_username, now,
+                            )
 
-            # 3) 标记本地已同步
-            synced_ids = [r["id"] for r in records if r.get("id")]
-            if synced_ids:
-                self.storage.mark_crdb_synced(synced_ids)
+                        if row_id:
+                            synced_ids.append(row_id)
+                        synced += 1
 
-            synced = len(records)
-            logger.info(f"[Sync] 已解析记录批量同步完成: {synced} 条")
+                    except Exception as e:
+                        logger.error(f"[Sync] 同步解析记录 {code} 失败: {e}")
 
-        except Exception as e:
-            logger.error(f"[Sync] 批量同步已解析记录失败: {e}")
+        if synced_ids:
+            self.storage.mark_crdb_synced(synced_ids)
 
+        if synced > 0:
+            logger.info(f"[Sync] 已解析记录同步完成: {synced} 条")
         return synced
 
     async def sync_all_resolved(self, batch_size: int = 200) -> int:

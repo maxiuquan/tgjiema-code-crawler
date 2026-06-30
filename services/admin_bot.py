@@ -1,5 +1,6 @@
 """管理员 Bot 服务（独立 Telegram Bot）
-使用 Bot Token 运行，通过 Cloudflare Worker API 管理 Bot 解码覆盖规则。
+使用 Bot Token 运行，通过 Cloudflare Worker API 管理 Bot 解码覆盖规则，
+并支持通过 Telegram 命令导出文件码 TXT。
 仅响应 ADMIN_USER_IDS 中配置的授权用户。
 
 启动方式:
@@ -9,7 +10,9 @@
   需要先部署 Cloudflare Worker (worker/) 并设置 CLOUDFLARE_API_URL / CLOUDFLARE_AUTH_TOKEN
 """
 
+import os
 import re
+from datetime import datetime
 from typing import Optional
 
 from loguru import logger
@@ -19,15 +22,17 @@ from telegram.ext import (
 )
 
 from config import settings
+from database import Storage
 from utils.cloudflare_api import CloudflareOverrideAPI
 
 
 class AdminBot:
     """独立的管理员 Bot — 基于 python-telegram-bot，数据存储在 Cloudflare D1"""
 
-    def __init__(self):
+    def __init__(self, storage: Optional[Storage] = None):
         self._app: Optional[Application] = None
         self._api: Optional[CloudflareOverrideAPI] = None
+        self._storage: Optional[Storage] = storage
 
     # ─── 启动 / 停止 ──────────────────────────────────
 
@@ -71,6 +76,7 @@ class AdminBot:
         self._app.add_handler(CommandHandler("remove_override", self._cmd_remove))
         self._app.add_handler(CommandHandler("toggle_override", self._cmd_toggle))
         self._app.add_handler(CommandHandler("list_overrides", self._cmd_list))
+        self._app.add_handler(CommandHandler("export_codes", self._cmd_export_codes))
 
         logger.info(
             f"[AdminBot] Bot 已启动, 授权用户: {settings.ADMIN_USER_IDS}"
@@ -109,6 +115,8 @@ class AdminBot:
             "  启用/禁用覆盖规则\n\n"
             "`/list_overrides`\n"
             "  列出所有覆盖规则\n\n"
+            "`/export_codes`\n"
+            "  导出所有已解析的文件码为纯文本 TXT，一行一个\n\n"
             "`/help`\n"
             "  显示此帮助信息",
             parse_mode="Markdown",
@@ -210,3 +218,42 @@ class AdminBot:
                 f"  [{status}]{note}"
             )
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    # ─── /export_codes ─────────────────────────────────
+
+    async def _cmd_export_codes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            return
+        if not self._storage:
+            await update.message.reply_text("存储未初始化，请联系管理员检查配置。")
+            return
+
+        # 先发送一条提示消息
+        status_msg = await update.message.reply_text("正在导出文件码，请稍候...")
+
+        try:
+            # 导出纯码模式 TXT
+            filepath = self._storage.export_to_txt(resolved_only=True, include_meta=False)
+            if not filepath or not os.path.exists(filepath):
+                await status_msg.edit_text("没有已解析的文件码需要导出。")
+                return
+
+            # 统计码数量
+            with open(filepath, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            code_count = len(lines)
+
+            # 发送 TXT 文件
+            await update.message.reply_document(
+                document=open(filepath, "rb"),
+                filename=os.path.basename(filepath),
+                caption=f"文件码导出 — {datetime.now().strftime('%Y-%m-%d %H:%M')}\n共 {code_count} 个码",
+            )
+
+            # 清理提示消息
+            await status_msg.delete()
+            logger.info(f"[AdminBot] 管理员 {update.effective_user.id} 导出了 {code_count} 个文件码")
+
+        except Exception as e:
+            logger.error(f"[AdminBot] 导出文件码失败: {e}")
+            await status_msg.edit_text(f"导出失败: {e}")

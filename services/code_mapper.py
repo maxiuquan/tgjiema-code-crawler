@@ -47,7 +47,7 @@ class CodeMapper:
             """)
         logger.info("[CodeMapper] external_code_mapping 表已就绪")
 
-    # ── 批量写入（核心 RU 优化）───────────────────────────────
+    # ─── 批量写入（核心 RU 优化）───────────────────────────────
 
     async def set_mapping_batch(
         self,
@@ -79,8 +79,8 @@ class CodeMapper:
                     )
                     # 批量 INSERT code_bot_mapping（幂等写入）
                     await conn.executemany(
-                        """INSERT INTO code_bot_mapping (code, bot_username, created_at)
-                           VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING""",
+                        """INSERT INTO code_bot_mapping (code_prefix, bot_username, created_at)
+                           VALUES ($1, $2, $3) ON CONFLICT (code_prefix) DO NOTHING""",
                         [(ec, bu, now) for ec, _, bu in mappings],
                     )
 
@@ -110,12 +110,12 @@ class CodeMapper:
 
         # 2) code_bot_mapping 去重写入
         await conn.execute("""
-            INSERT INTO code_bot_mapping (code, bot_username, created_at)
+            INSERT INTO code_bot_mapping (code_prefix, bot_username, created_at)
             VALUES ($1, $2, $3)
-            ON CONFLICT (code) DO NOTHING
+            ON CONFLICT (code_prefix) DO NOTHING
         """, external_code, bot_username, now)
 
-    # ── 单条写入（兼容旧接口，内部复用批量逻辑）────────────────
+    # ─── 单条写入（兼容旧接口，内部复用批量逻辑）────────────────
 
     async def set_mapping(
         self,
@@ -142,7 +142,7 @@ class CodeMapper:
             logger.error(f"[CodeMapper] 写入映射失败 (external={external_code}): {e}")
             return False
 
-    # ── 读取接口（无变更）───────────────────────────────────────
+    # ─── 读取接口（无变更）───────────────────────────────────────
 
     async def get_system_code(self, external_code: str) -> Optional[str]:
         """查询外部码对应的系统码。"""

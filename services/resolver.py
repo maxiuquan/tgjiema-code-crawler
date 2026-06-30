@@ -453,7 +453,7 @@ class CodeResolver:
                     self.storage.mark_resolved(code_id=code_id)
                     return True
 
-        # ── 获取外部机器人实体 ──
+        # ─── 获取外部机器人实体 ───
         try:
             entity = await self.client.get_entity(bot_username)
         except (ValueError, UsernameNotOccupiedError) as e:
@@ -469,7 +469,7 @@ class CodeResolver:
             self.storage.mark_resolve_failed(code_id, f"get_entity_error:{e}")
             return False
 
-        # ── 创建 exchange ──
+        # ─── 创建 exchange ───
         collect_event = asyncio.Event()
         now_ts = asyncio.get_event_loop().time()
         self._bot_exchange[bot_username_lower] = {
@@ -488,7 +488,7 @@ class CodeResolver:
             "_page_count": 0,
         }
 
-        # ── 发送码到外部机器人 ──
+        # ─── 发送码到外部机器人 ───
         try:
             sent = await self.client.send_message(entity, code)
             logger.info(f"[Resolver] 已发送码到 @{bot_username}: {code} (msg_id={sent.id})")
@@ -508,7 +508,7 @@ class CodeResolver:
             self._cleanup_exchange(bot_username_lower)
             return False
 
-        # ── 启动初始 settle ──
+        # ─── 启动初始 settle ───
         exchange = self._bot_exchange[bot_username_lower]
         exchange["_settle_task"] = asyncio.create_task(
             self._settle_loop_initial(bot_username_lower)
@@ -526,7 +526,7 @@ class CodeResolver:
             self._cleanup_exchange(bot_username_lower)
             return False
 
-        # ── 翻页循环 ──
+        # ─── 翻页循环 ───
         exchange = self._bot_exchange.get(bot_username_lower)
         if exchange:
             await self._pagination_loop(bot_username_lower)
@@ -553,7 +553,7 @@ class CodeResolver:
         system_code: Optional[str] = None
 
         if self._upbot:
-            system_code = await self._upbot.upload_files(media_events)
+            system_code = await self._upbot.upload_files(media_events, external_code=code)
 
         if system_code and self._mapper:
             await self._mapper.set_mapping(
@@ -570,7 +570,7 @@ class CodeResolver:
             self._cleanup_exchange(bot_username_lower)
             return True
 
-        # ── 回退：up_bot 不可用时记录失败 ──
+        # ─── 回退：up_bot 不可用时记录失败 ───
         if not system_code:
             logger.warning(f"[Resolver] 未获取到系统码，文件码 {code} 标记为失败")
             self.storage.mark_resolve_failed(code_id, "no_system_code_from_upbot")
@@ -706,6 +706,9 @@ class CodeResolver:
         old_task = exchange.get("_settle_task")
         if old_task and not old_task.done():
             old_task.cancel()
+        last_settle = exchange.get("_last_settle_task")
+        if last_settle and not last_settle.done():
+            last_settle.cancel()
         ev = exchange.get("_collect_event")
         if ev and not ev.is_set():
             ev.set()

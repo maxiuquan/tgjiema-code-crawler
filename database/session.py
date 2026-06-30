@@ -1,5 +1,4 @@
 import csv
-import json
 import os
 import sqlite3
 import threading
@@ -8,7 +7,34 @@ from typing import List, Optional
 
 from loguru import logger
 
+try:
+    import orjson as json
+except ImportError:
+    import json
+
 from config import settings
+
+
+def _json_dumps(obj, **kwargs):
+    """json.dumps compatible wrapper."""
+    result = json.dumps(obj, **kwargs)
+    if isinstance(result, bytes):
+        return result.decode()
+    return result
+
+
+def _safe_str(val):
+    if val is None:
+        return None
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val
+    if isinstance(val, (list, dict)):
+        return _json_dumps(val, default=str)
+    if isinstance(val, datetime):
+        return val.isoformat()
+    return str(val)
 
 
 class Storage:
@@ -265,8 +291,8 @@ class Storage:
     def get_all_codes(self, limit: int = None, offset: int = 0,
                       verified_only: bool = False) -> List[dict]:
         conn = self._conn
-        query = "SELECT * FROM file_codes"
         params = []
+        query = "SELECT * FROM file_codes"
         conditions = []
         if verified_only:
             conditions.append("is_verified = 1")
@@ -274,8 +300,9 @@ class Storage:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY discovered_at DESC"
         if limit:
-            query += f" LIMIT {int(limit)} OFFSET {int(offset)}"
-        rows = conn.execute(query, params).fetchall()
+            query += " LIMIT ? OFFSET ?"
+            params.extend([int(limit), int(offset)])
+        rows = conn.execute(query, *params).fetchall()
         return [dict(r) for r in rows]
 
     def get_unresolved_codes(self, limit: int = 10, max_attempts: int = 3) -> List[dict]:
@@ -332,7 +359,7 @@ class Storage:
         )
         conn.commit()
 
-    # ── 映射缓存（本地 SQLite，省 CRDB has_mapping 查询）────────
+    # ─── 映射缓存（本地 SQLite，省 CRDB has_mapping 查询）────────
 
     def is_code_mapped(self, code: str) -> bool:
         """检查本地 SQLite 中是否已有外部码映射记录。"""
@@ -434,7 +461,9 @@ class Storage:
 
     def get_crawl_stats(self) -> dict:
         conn = self._conn
-        channels = conn.execute("SELECT COUNT(*) as cnt FROM channels").fetchone()["cnt"]
+        channels = conn.execute(
+            "SELECT COUNT(*) as cnt FROM channels WHERE is_active = 1"
+        ).fetchone()["cnt"]
         active_channels = conn.execute(
             "SELECT COUNT(*) as cnt FROM channels WHERE is_active = 1"
         ).fetchone()["cnt"]
@@ -523,6 +552,50 @@ class Storage:
         logger.info(f"[Storage] 已导出 {len(codes)} 个文件码到 {filepath}")
         return filepath
 
+    def export_to_txt(self, filepath: str = None, resolved_only: bool = True,
+                      include_meta: bool = True) -> str:
+        """导出文件码为纯文本 TXT 文件，每行一个码，可直接用于导入/分享。
+
+        Args:
+            filepath: 输出路径，默认自动生成
+            resolved_only: True 只导出已解析的码，False 导出所有
+            include_meta: 是否在每行附带来源频道和时间信息
+        """
+        if resolved_only:
+            codes = self._get_resolved_and_uneported(limit=50000)
+        else:
+            codes = self.get_uneported_codes(limit=50000)
+
+        if not filepath:
+            os.makedirs(settings.EXPORT_DIR, exist_ok=True)
+            filename = f"codes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            filepath = os.path.join(settings.EXPORT_DIR, filename)
+
+        code_ids = []
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(f"# 文件码导出 — {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# 总计: {len(codes)} 个码\n")
+            if include_meta:
+                f.write("# 格式: 文件码 | Bot用户名 | 来源频道 | 发现时间\n")
+            f.write("\n")
+
+            for c in codes:
+                if include_meta:
+                    f.write(
+                        f"{c['code']} | @{c['bot_username']} | "
+                        f"{c.get('source_channel_title', '未知')} | "
+                        f"{c.get('discovered_at', '')}\n"
+                    )
+                else:
+                    f.write(f"{c['code']}\n")
+                code_ids.append(c["id"])
+
+        if code_ids:
+            self.mark_exported(code_ids)
+
+        logger.info(f"[Storage] 已导出 {len(codes)} 个文件码到 TXT: {filepath}")
+        return filepath
+
     def _get_resolved_and_uneported(self, limit: int = 10000) -> List[dict]:
         conn = self._conn
         rows = conn.execute(
@@ -559,6 +632,15 @@ class Storage:
         conn.execute("DELETE FROM resolve_log")
         conn.commit()
         logger.info("[Storage] 已清空所有文件码和解析记录")
+
+    def reset_failed_codes(self):
+        """重置失败码的解析状态，允许重新解析。"""
+        conn = self._conn
+        conn.execute(
+            "UPDATE file_codes SET resolve_attempts = 0, resolve_error = NULL WHERE is_resolved = 0"
+        )
+        conn.commit()
+        logger.info("[Storage] 已重置失败码的解析状态")
 
     # ─── Bot 覆盖规则管理 ─────────────────────────────────
 

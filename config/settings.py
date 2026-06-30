@@ -1,5 +1,7 @@
-from typing import List
+from typing import List, Optional
 
+from loguru import logger
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -31,6 +33,7 @@ class Settings(BaseSettings):
     # ── 主系统 Bot 用户名 ───────────────────────────────
     UPLOAD_BOT_USERNAME: str = ""
     DECODER_BOT_USERNAME: str = ""
+    SENDER_BOT_USERNAME: str = ""
 
     # ── 文件码前缀（与主系统一致） ───────────────────────
     FILE_CODE_PREFIX: str = "tgwenjian"
@@ -65,6 +68,19 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
+
+    @model_validator(mode='after')
+    def validate_required_fields(self):
+        """验证必填字段,在启动时尽早发现问题。"""
+        missing = []
+        if not self.TELEGRAM_API_ID:
+            missing.append('TELEGRAM_API_ID')
+        if not self.TELEGRAM_API_HASH:
+            missing.append('TELEGRAM_API_HASH')
+        if missing:
+            logger.warning(f"[Settings] 以下环境变量未配置: {', '.join(missing)}")
+        return self
 
 
 settings = Settings()

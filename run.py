@@ -1,5 +1,11 @@
 """文件码爬虫系统 运行入口
 启动爬虫 / 解析器 / 守护模式 / 同步等组件
+
+支持两种运行模式:
+  python run.py daemon               → 全自动模式(爬取→解析→同步循环)
+  python run.py crawl                → 单次爬取
+  python run.py resolve              → 单次解析
+  python run.py admin-bot            → 管理员 Bot 监听模式
 """
 
 import argparse
@@ -11,6 +17,13 @@ import sys
 
 from loguru import logger
 from telethon import TelegramClient
+
+try:
+    import uvloop
+    uvloop.install()
+    print("[Run] uvloop 已启用")
+except ImportError:
+    print("[Run] uvloop 未安装,使用默认事件循环")
 
 from config import settings
 from database import Storage
@@ -89,6 +102,7 @@ async def cmd_crawl(args):
     finally:
         await client.disconnect()
         storage.close()
+        crawler.stop()
 
 
 async def cmd_resolve(args):
@@ -114,6 +128,7 @@ async def cmd_resolve(args):
             if unresolved:
                 logger.info(f"仍有 {unresolved} 个文件码待解析")
     finally:
+        resolver.stop()
         await resolver.close()
         await client.disconnect()
         storage.close()
@@ -226,6 +241,11 @@ async def cmd_export(args):
         filepath = storage.export_to_json(filepath=args.output, resolved_only=resolved_only)
     elif args.format == "csv":
         filepath = storage.export_to_csv(filepath=args.output, resolved_only=resolved_only)
+    elif args.format == "txt":
+        filepath = storage.export_to_txt(
+            filepath=args.output, resolved_only=resolved_only,
+            include_meta=not args.codes_only,
+        )
 
     if filepath:
         logger.info(f"导出成功: {filepath}")
@@ -286,11 +306,7 @@ async def cmd_retry_failed(args):
     configure_logging()
     storage = Storage()
 
-    conn = storage._conn
-    conn.execute(
-        "UPDATE file_codes SET resolve_attempts = 0, resolve_error = NULL WHERE is_resolved = 0"
-    )
-    conn.commit()
+    storage.reset_failed_codes()
     count = storage.get_unresolved_count()
     logger.info(f"已重置 {count} 个失败码的解析状态，可以重新尝试解析")
     storage.close()
@@ -365,7 +381,8 @@ async def cmd_admin_bot(args):
         logger.error("CLOUDFLARE_API_URL / CLOUDFLARE_AUTH_TOKEN 未配置，请在 .env 中设置")
         return
 
-    admin_bot = AdminBot()
+    storage = Storage()
+    admin_bot = AdminBot(storage=storage)
     logger.info("[AdminBot] 正在启动独立管理员 Bot...")
 
     try:
@@ -374,6 +391,7 @@ async def cmd_admin_bot(args):
         pass
     finally:
         await admin_bot.stop()
+        storage.close()
 
 
 def _setup_signal_handlers(handler):
@@ -469,6 +487,9 @@ def main():
   # 导出已解析的文件码
   python run.py export --format json
 
+  # 导出为纯文本 TXT（仅码本身，一行一个）
+  python run.py export --format txt --codes-only
+
   # 重置失败的解析记录，重新尝试
   python run.py retry-failed
 
@@ -514,9 +535,10 @@ def main():
     status_parser = subparsers.add_parser("status", help="查看爬取和解析状态")
 
     export_parser = subparsers.add_parser("export", help="导出文件码")
-    export_parser.add_argument("--format", choices=["json", "csv"], default="json", help="导出格式")
+    export_parser.add_argument("--format", choices=["json", "csv", "txt"], default="json", help="导出格式")
     export_parser.add_argument("--output", "-o", help="输出文件路径")
     export_parser.add_argument("--all", action="store_true", help="导出所有未导出的码（含未解析）")
+    export_parser.add_argument("--codes-only", action="store_true", help="(txt格式) 仅输出码本身，不含来源信息")
 
     import_parser = subparsers.add_parser("import", help="导入文件码 (JSON)")
     import_parser.add_argument("file", help="JSON 文件路径")
@@ -529,7 +551,7 @@ def main():
 
     retry_parser = subparsers.add_parser("retry-failed", help="重置失败码的状态，允许重新解析")
 
-    # ── Bot 覆盖规则管理 ──
+    # ─── Bot 覆盖规则管理 ──
     override_add = subparsers.add_parser("override-add", help="添加 Bot 覆盖规则")
     override_add.add_argument("prefix", help="文件码前缀")
     override_add.add_argument("bot", help="覆盖使用的 Bot 用户名")
