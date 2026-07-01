@@ -188,6 +188,8 @@ async def cmd_daemon(args):
             f"解析历史: {resolve_st['done']} 成功 / {resolve_st['failed']} 失败"
         )
 
+        storage.cleanup_cooldowns()
+
         if running and args.interval > 0:
             logger.info(f"[Daemon] 等待 {args.interval} 秒后开始下一轮...")
             for _ in range(args.interval):

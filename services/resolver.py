@@ -257,6 +257,7 @@ class CodeResolver:
             "next", "下一页", "下一頁", "下一组",
             "→", "▶", "➡", ">>", "»",
         )
+        _FINISH_KW = {"finish", "done", "完成", "结束"}
         keyboard_msg = exchange.get("_keyboard_msg")
         if not keyboard_msg or not keyboard_msg.reply_markup:
             return None
@@ -266,12 +267,14 @@ class CodeResolver:
 
         exchange.pop("_keyboard_msg", None)
 
+        # Phase 1: text-based next detection
         for row_idx, row in enumerate(rp.rows):
             for col_idx, btn in enumerate(row.buttons):
                 btn_text = (getattr(btn, "text", None) or "").lower().strip()
                 if any(kw in btn_text for kw in _NEXT_KW):
                     return (row_idx, col_idx)
 
+        # Phase 2: number pagination
         for row in rp.rows:
             btn_texts = [(getattr(b, "text", None) or "").strip() for b in row.buttons]
             numbers = []
@@ -280,20 +283,55 @@ class CodeResolver:
                 if n is not None:
                     numbers.append((col_idx, t, n))
             if len(numbers) >= 3:
+                all_nums = sorted([n for _, _, n in numbers])
                 last = exchange.get("_last_page_num")
                 if last is None:
-                    target = 2 if 2 in [n for _, _, n in numbers] else numbers[1][2]
+                    target = 2 if 2 in all_nums else all_nums[1] if len(all_nums) > 1 else all_nums[0]
+                    exchange["_last_button_range"] = tuple(all_nums)
                 else:
                     target = last + 1
-                    all_nums = sorted([n for _, _, n in numbers])
                     if target > all_nums[-1]:
-                        return None
+                        current_range = tuple(all_nums)
+                        prev_range = exchange.get("_last_button_range")
+                        if current_range != prev_range:
+                            # 按钮范围已变化（扩展或移位），在新范围内继续
+                            exchange["_last_button_range"] = current_range
+                            if target > all_nums[-1]:
+                                exchange["_last_page_num"] = None
+                                target = 2 if 2 in all_nums else all_nums[1] if len(all_nums) > 1 else all_nums[0]
+                        else:
+                            # 范围未变化，fallthrough 到 Phase 3/4 尝试其他按钮类型
+                            break
                 for col_idx, t, n in numbers:
                     if n == target:
                         exchange["_last_page_num"] = target
                         row_idx = rp.rows.index(row)
                         return (row_idx, col_idx)
                 break
+
+        # Phase 3: icon-only — click rightmost button with callback_data
+        for row_idx in range(len(rp.rows) - 1, -1, -1):
+            row = rp.rows[row_idx]
+            if not row.buttons:
+                continue
+            btn_texts = [(getattr(b, "text", None) or "").strip() for b in row.buttons]
+            all_empty = all(not t for t in btn_texts)
+            if all_empty:
+                last_btn = row.buttons[-1]
+                if getattr(last_btn, "data", None):
+                    return (row_idx, len(row.buttons) - 1)
+
+        # Phase 4: any remaining callback button as potential next
+        clicked = exchange.get("_clicked_buttons") or set()
+        for row_idx, row in enumerate(rp.rows):
+            for col_idx, btn in enumerate(row.buttons):
+                if getattr(btn, "data", None):
+                    btn_text = (getattr(btn, "text", None) or "").strip().lower()
+                    if any(kw in btn_text for kw in _FINISH_KW):
+                        continue
+                    if (row_idx, col_idx) in clicked:
+                        continue
+                    return (row_idx, col_idx)
 
         return None
 
@@ -326,7 +364,7 @@ class CodeResolver:
 
         exchange.pop("_keyboard_msg", None)
 
-        try:
+        async def _do_click():
             if hasattr(target_btn, "data") and target_btn.data:
                 await keyboard_msg.click(data=target_btn.data)
                 btn_text = getattr(target_btn, "text", "") or "(图标按钮)"
@@ -344,9 +382,24 @@ class CodeResolver:
                         await self.client.send_message(entity, f"/start {start_param}")
                         logger.info(f"[Resolver] 已通过 deep link 翻页 (bot=@{bot_username})")
                         return True
+            return False
+
+        try:
+            return await _do_click()
+        except FloodWaitError as e:
+            logger.warning(f"[Resolver] 触发 FloodWait，等待 {e.seconds}s (bot=@{bot_username})")
+            exchange["_min_click_interval"] = max(
+                exchange.get("_min_click_interval", 0), e.seconds
+            )
+            await asyncio.sleep(e.seconds)
+            try:
+                return await _do_click()
+            except Exception as retry_e:
+                logger.warning(f"[Resolver] FloodWait 后重试失败 [{row},{col}]: {retry_e}")
+                return False
         except Exception as e:
             logger.warning(f"[Resolver] 点击按钮失败 [{row},{col}]: {e}")
-        return False
+            return False
 
     # ─── 主入口 ──────────────────────────────────────────
 
@@ -451,6 +504,7 @@ class CodeResolver:
             "code_id": code_id,
             "bot_username": bot_username,
             "media_events": [],
+            "text_responses": [],
             "_collect_event": collect_event,
             "_collection_done": False,
             "_expires": now_ts + 300,
@@ -460,9 +514,22 @@ class CodeResolver:
             "_board_version": 0,
             "_last_page_num": None,
             "_page_count": 0,
+            "_last_button_range": None,
+            "_clicked_buttons": set(),
+            "_min_click_interval": 0,
+            "_last_click_time": 0,
         }
 
         # ─── 发送码到外部机器人 ───
+        # 检查冷却期：如果该机器人刚被限速，先等待冷却
+        cooldown = self.storage.get_bot_cooldown(bot_username)
+        if cooldown > 0:
+            logger.info(
+                f"[Resolver] @{bot_username} 在冷却期，等待 {cooldown:.0f}s"
+            )
+            self._cleanup_exchange(bot_username_lower)
+            await asyncio.sleep(cooldown)
+
         try:
             sent = await self.client.send_message(entity, code)
             logger.info(f"[Resolver] 已发送码到 @{bot_username}: {code} (msg_id={sent.id})")
@@ -613,6 +680,7 @@ class CodeResolver:
     async def _pagination_loop(self, bot_username: str):
         started_at = asyncio.get_event_loop().time()
         timeout = settings.RESOLVE_PAGINATION_TIMEOUT
+        stale_clicks = 0
 
         while True:
             if timeout > 0:
@@ -628,6 +696,8 @@ class CodeResolver:
             if not exchange:
                 break
 
+            board_before = exchange.get("_board_version", 0)
+
             btn_pos = self._detect_next_button(exchange)
             if not btn_pos:
                 logger.debug(f"[Resolver] @{bot_username} 无翻页按钮，翻页结束")
@@ -635,11 +705,31 @@ class CodeResolver:
 
             row, col = btn_pos
 
+            # 检查消息编辑导致的按钮变化
+            exchange = self._bot_exchange.get(bot_username)
+            if exchange and exchange.get("_board_version", 0) != board_before:
+                logger.debug(f"[Resolver] @{bot_username} 按钮已更新，重新评估")
+                continue
+
             rate_wait = self._check_rate_limit(exchange)
             if rate_wait > 0:
                 logger.info(f"[Resolver] @{bot_username} 翻页限速等待 {rate_wait}s")
+                self.storage.set_bot_cooldown(bot_username, int(rate_wait))
                 exchange.pop("text_responses", None)
                 await asyncio.sleep(rate_wait)
+
+            # 自适应点击间隔
+            exchange = self._bot_exchange.get(bot_username)
+            if exchange:
+                min_interval = exchange.get("_min_click_interval", 0)
+                last_click = exchange.get("_last_click_time", 0)
+                now = asyncio.get_event_loop().time()
+                remaining = (last_click + min_interval) - now
+                if remaining > 0:
+                    logger.debug(
+                        f"[Resolver] @{bot_username} 点击间隔限制，等待 {remaining:.1f}s"
+                    )
+                    await asyncio.sleep(remaining)
 
             media_before = len(exchange.get("media_events", []))
             exchange["_collection_done"] = False
@@ -654,6 +744,11 @@ class CodeResolver:
             if not clicked:
                 break
 
+            exchange = self._bot_exchange.get(bot_username)
+            if exchange:
+                exchange.setdefault("_clicked_buttons", set()).add((row, col))
+                exchange["_last_click_time"] = asyncio.get_event_loop().time()
+
             try:
                 await asyncio.wait_for(new_event.wait(), timeout=15)
             except asyncio.TimeoutError:
@@ -664,15 +759,21 @@ class CodeResolver:
                 break
 
             media_after = len(exchange.get("media_events", []))
-            if media_after <= media_before:
-                logger.debug(f"[Resolver] @{bot_username} 翻页后无新文件，结束翻页")
-                break
-
-            exchange["_page_count"] = exchange.get("_page_count", 0) + 1
-            logger.info(
-                f"[Resolver] @{bot_username} 第 {exchange['_page_count']} 次翻页: "
-                f"新增 {media_after - media_before} 个文件 (累计 {media_after})"
-            )
+            if media_after > media_before:
+                stale_clicks = 0
+                exchange["_page_count"] = exchange.get("_page_count", 0) + 1
+                logger.info(
+                    f"[Resolver] @{bot_username} 第 {exchange['_page_count']} 次翻页: "
+                    f"新增 {media_after - media_before} 个文件 (累计 {media_after})"
+                )
+            else:
+                stale_clicks += 1
+                logger.debug(
+                    f"[Resolver] @{bot_username} 翻页无新文件 (stale_clicks={stale_clicks}/3)"
+                )
+                if stale_clicks >= 3:
+                    logger.info(f"[Resolver] @{bot_username} 连续翻页无新内容，结束收集")
+                    break
 
     async def _settle_after_page(self, bot_username: str, event: asyncio.Event):
         await asyncio.sleep(_SETTLE_WAIT)

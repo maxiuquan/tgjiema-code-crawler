@@ -134,6 +134,14 @@ class Storage:
             CREATE INDEX IF NOT EXISTS idx_file_codes_resolved ON file_codes(is_resolved);
             CREATE INDEX IF NOT EXISTS idx_resolve_log_status ON resolve_log(status);
             CREATE INDEX IF NOT EXISTS idx_bot_overrides_prefix ON bot_overrides(code_prefix);
+
+            CREATE TABLE IF NOT EXISTS bot_cooldown (
+                bot_username TEXT PRIMARY KEY,
+                cooldown_seconds INTEGER NOT NULL DEFAULT 0,
+                last_decode_at TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
         """)
         conn.commit()
 
@@ -714,6 +722,58 @@ class Storage:
         if rows:
             return dict(rows[0])
         return None
+
+    # ─── Bot 冷却管理 ─────────────────────────────────
+
+    def get_bot_cooldown(self, bot_username: str) -> float:
+        """检查机器人是否在冷却期，返回剩余冷却秒数（0 表示不在冷却期）。"""
+        conn = self._conn
+        row = conn.execute(
+            "SELECT cooldown_seconds, last_decode_at FROM bot_cooldown WHERE bot_username = ?",
+            (bot_username.lower(),),
+        ).fetchone()
+        if not row or not row["last_decode_at"]:
+            return 0
+        try:
+            last_at = datetime.fromisoformat(row["last_decode_at"])
+        except (ValueError, TypeError):
+            return 0
+        elapsed = (datetime.now(timezone.utc) - last_at).total_seconds()
+        remaining = max(0, row["cooldown_seconds"] - elapsed)
+        return remaining
+
+    def set_bot_cooldown(self, bot_username: str, cooldown_seconds: int):
+        """记录机器人的冷却时间（从解码器返回的限速文本中提取）。"""
+        conn = self._conn
+        now = datetime.now(timezone.utc).isoformat()
+        logger.info(
+            f"[Storage] 设置 @{bot_username} 冷却 {cooldown_seconds}s"
+        )
+        conn.execute(
+            """INSERT INTO bot_cooldown (bot_username, cooldown_seconds, last_decode_at, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(bot_username) DO UPDATE SET
+               cooldown_seconds=excluded.cooldown_seconds,
+               last_decode_at=excluded.last_decode_at,
+               updated_at=excluded.updated_at""",
+            (bot_username.lower(), cooldown_seconds, now, now),
+        )
+        conn.commit()
+
+    def cleanup_cooldowns(self):
+        """清理已过期的冷却记录，防止无用堆积。"""
+        conn = self._conn
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """DELETE FROM bot_cooldown
+               WHERE last_decode_at IS NOT NULL
+               AND datetime(last_decode_at, '+' || cooldown_seconds || ' seconds') < ?""",
+            (now,),
+        )
+        deleted = conn.total_changes
+        conn.commit()
+        if deleted > 0:
+            logger.debug(f"[Storage] 清理 {deleted} 条过期 bot_cooldown 记录")
 
 
 def get_db() -> Storage:
