@@ -1,8 +1,8 @@
 """文件码爬虫系统 运行入口
-启动爬虫 / 解析器 / 守护模式 / 同步等组件
+启动爬虫 / 解析器 / 守护模式等组件
 
 支持两种运行模式:
-  python run.py daemon               → 全自动模式(爬取→解析→同步循环)
+  python run.py daemon               → 全自动模式(爬取→解析循环)
   python run.py crawl                → 单次爬取
   python run.py resolve              → 单次解析
   python run.py admin-bot            → 管理员 Bot 监听模式
@@ -155,7 +155,7 @@ async def cmd_daemon(args):
         resolver.stop()
 
     _setup_signal_handlers(_signal_handler)
-    logger.info("[Daemon] 启动全自动模式: 爬取已加入频道 → 解析（上传+映射） 交替循环")
+    logger.info("[Daemon] 启动全自动模式: 爬取已加入频道 → 解析（上传至主系统）交替循环")
 
     cycle = 0
     while running:
@@ -171,8 +171,8 @@ async def cmd_daemon(args):
             except Exception as e:
                 logger.error(f"[Daemon] 爬取阶段失败: {e}")
 
-        # 2. 解析待处理文件码（内部通过 up_bot 上传 + CodeMapper 写映射到 CockroachDB）
-        logger.info("[Daemon] 阶段2: 解析待处理文件码（上传+映射）...")
+        # 2. 解析待处理文件码（内部通过 up_bot 上传到主系统）
+        logger.info("[Daemon] 阶段2: 解析待处理文件码（上传至主系统）...")
         try:
             resolved = await resolver.resolve_next_batch(batch_size=args.resolve_batch)
             logger.info(f"[Daemon] 解析完成: 成功 {resolved} 个")
@@ -289,19 +289,6 @@ async def cmd_channels(args):
 
     print(f"{'=' * 65}\n")
     storage.close()
-
-
-async def cmd_sync(args):
-    configure_logging()
-    from services.cockroach_sync import CockroachSync
-    storage = Storage()
-    syncer = CockroachSync(storage)
-    try:
-        total = await syncer.sync_all(batch_size=args.batch)
-        logger.info(f"同步完成，共同步 {total} 个文件码")
-    finally:
-        await syncer.close()
-        storage.close()
 
 
 async def cmd_retry_failed(args):
@@ -477,7 +464,7 @@ def main():
   # 持续解析模式（自动轮询未解析码）
   python run.py resolve --daemon
 
-  # 全自动模式：爬取 → 解析 → 同步 CockroachDB 循环
+  # 全自动模式：爬取 → 解析 循环
   python run.py daemon
 
   # 查看爬取和解析状态
@@ -491,9 +478,6 @@ def main():
 
   # 重置失败的解析记录，重新尝试
   python run.py retry-failed
-
-  # 同步到 CockroachDB
-  python run.py sync
 
   # ── Bot 覆盖规则管理 ──
   # 添加覆盖规则（前缀为 xxx 的码用指定 Bot 解析）
@@ -525,7 +509,7 @@ def main():
     resolve_parser.add_argument("--batch", type=int, default=settings.RESOLVE_BATCH_SIZE,
                                 help="每批解析数量")
 
-    daemon_parser = subparsers.add_parser("daemon", help="全自动模式: 爬取→解析→同步循环")
+    daemon_parser = subparsers.add_parser("daemon", help="全自动模式: 爬取→解析循环")
     daemon_parser.add_argument("--interval", type=int, default=settings.DAEMON_CYCLE_INTERVAL,
                                help="轮询间隔（秒）")
     daemon_parser.add_argument("--resolve-batch", type=int, default=settings.RESOLVE_BATCH_SIZE,
@@ -544,9 +528,6 @@ def main():
 
     channels_parser = subparsers.add_parser("channels", help="查看频道列表")
     channels_parser.add_argument("--all", action="store_true", help="显示所有频道（含非活跃）")
-
-    sync_parser = subparsers.add_parser("sync", help="同步文件码到 CockroachDB")
-    sync_parser.add_argument("--batch", type=int, default=500, help="每批同步数量")
 
     retry_parser = subparsers.add_parser("retry-failed", help="重置失败码的状态，允许重新解析")
 
@@ -581,7 +562,6 @@ def main():
         "export": cmd_export,
         "import": cmd_import_,
         "channels": cmd_channels,
-        "sync": cmd_sync,
         "retry-failed": cmd_retry_failed,
         "override-add": cmd_override_add,
         "override-remove": cmd_override_remove,

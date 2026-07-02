@@ -1,5 +1,6 @@
-"""UpbotUploader — 通过主系统 up_bot 上传文件（EXTERNAL_RELAY 协议）并获取系统码
-采集器解析到外部文件后，走主系统专用的中继上传协议，避免普通上传流程的交互式按钮。
+"""UpbotUploader — 通过主系统 up_bot 上传文件（EXTERNAL_RELAY 协议）
+采集器作为普通用户向主系统上传文件，全部走 up_bot，不直连主系统数据库。
+主系统 idx_bot 负责生成系统码、写入 file_records 和 external_code_mapping。
 """
 
 import asyncio
@@ -11,22 +12,18 @@ from telethon import TelegramClient, events
 
 from config import settings
 
-# idx_bot 系统码通知消息格式: "外部文件 xxx 已就绪，请重新发送文件码即可查收。"
-# 或 "文件码：`tgwenjian_xxx`..."
-_CODE_PATTERN = re.compile(rf"`\s*({re.escape(settings.FILE_CODE_PREFIX)}\w+)`")
-# 外部文件就绪通知: "外部文件 {code} 已就绪"
+# idx_bot 外部文件就绪通知: "外部文件 {code} 已就绪"
 _EXT_READY_PATTERN = re.compile(r"外部文件\s+(\S+)\s+已就绪")
 
 
 class UpbotUploader:
-    """通过主系统 EXTERNAL_RELAY 协议上传文件到存储频道，获取系统码。"""
+    """通过主系统 EXTERNAL_RELAY 协议上传文件到存储频道，等待 idx_bot 确认。"""
 
     def __init__(self, client: TelegramClient):
         self.client = client
         self._handler_registered = False
         self._me_id: Optional[int] = None
-        self._code_queue: asyncio.Queue = asyncio.Queue()
-        self._pending: dict[str, asyncio.Event] = {}  # external_code → Event
+        self._ready_events: dict[str, asyncio.Event] = {}  # external_code → Event
 
     async def _get_me_id(self) -> int:
         if self._me_id is None:
@@ -35,7 +32,7 @@ class UpbotUploader:
         return self._me_id
 
     def register_handler(self):
-        """注册事件处理器，捕获 idx_bot 返回的系统码通知。"""
+        """注册事件处理器，捕获 idx_bot 返回的外部文件就绪通知。"""
         if self._handler_registered:
             return
         self._handler_registered = True
@@ -56,62 +53,43 @@ class UpbotUploader:
             if not text:
                 return
 
-            # 方式1: 匹配系统码格式 `tgwenjian_xxx`
-            match = _CODE_PATTERN.search(text)
-            if match:
-                system_code = match.group(1)
-                logger.info(f"[Upbot] 捕获系统码: {system_code} (来源=@{sender_username})")
-                await self._code_queue.put(system_code)
-                for ev in list(self._pending.values()):
-                    if not ev.is_set():
-                        ev.set()
-                return
-
-            # 方式2: 匹配外部文件就绪通知 "外部文件 xxx 已就绪"
+            # 匹配外部文件就绪通知 "外部文件 xxx 已就绪"
             ext_match = _EXT_READY_PATTERN.search(text)
             if ext_match:
                 ext_code = ext_match.group(1)
                 logger.info(f"[Upbot] 外部文件就绪通知: {ext_code}")
-                await self._code_queue.put(f"__ext_ready__:{ext_code}")
-                ev = self._pending.get(ext_code)
+                ev = self._ready_events.get(ext_code)
                 if ev and not ev.is_set():
                     ev.set()
 
-    async def upload_files(self, media_events: list, external_code: str = "") -> Optional[str]:
-        """通过 EXTERNAL_RELAY 协议上传文件到主系统，获取系统码。
+    async def upload_files(self, media_events: list, external_code: str = "") -> bool:
+        """通过 EXTERNAL_RELAY 协议上传文件到主系统，等待 idx_bot 确认处理完成。
 
         Args:
             media_events: 外部机器人返回的媒体事件列表
-            external_code: 外部文件码（用于关联映射）
+            external_code: 外部文件码
 
         Returns:
-            系统码 (tgwenjian_xxx)，失败返回 None
+            True 表示上传成功且主系统已确认处理，False 表示失败
         """
         self.register_handler()
 
         up_bot_username = settings.UPLOAD_BOT_USERNAME.lstrip("@")
         if not up_bot_username:
             logger.error("[Upbot] UPLOAD_BOT_USERNAME 未配置")
-            return None
+            return False
 
         try:
             entity = await self.client.get_entity(up_bot_username)
         except Exception as e:
             logger.error(f"[Upbot] 无法获取 up_bot 实体 @{up_bot_username}: {e}")
-            return None
+            return False
 
         my_id = await self._get_me_id()
 
-        # 清空残留队列
-        while not self._code_queue.empty():
-            try:
-                self._code_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-
         if not external_code:
             logger.warning("[Upbot] 未提供 external_code，无法关联映射")
-            return None
+            return False
 
         # ─── 1) 逐个发送文件，带 EXTERNAL_RELAY 标记 ───
         file_count = 0
@@ -130,7 +108,7 @@ class UpbotUploader:
 
         if file_count == 0:
             logger.warning("[Upbot] 没有可发送的文件")
-            return None
+            return False
 
         await asyncio.sleep(1)
 
@@ -139,92 +117,30 @@ class UpbotUploader:
             await self.client.send_message(entity, f"EXTERNAL_DONE:{my_id}:{external_code}")
             logger.info(
                 f"[Upbot] 已向 up_bot 上传 {file_count} 个文件 "
-                f"(external_code={external_code}), 等待 idx_bot 生成系统码..."
+                f"(external_code={external_code}), 等待 idx_bot 确认..."
             )
         except Exception as e:
             logger.error(f"[Upbot] EXTERNAL_DONE 发送失败: {e}")
-            return None
+            return False
 
-        # ─── 3) 等待 idx_bot 返回系统码（双重机制：消息监听 + 数据库轮询）───
+        # ─── 3) 等待 idx_bot 返回"外部文件已就绪"通知 ───
         wait_event = asyncio.Event()
-        self._pending[external_code] = wait_event
+        self._ready_events[external_code] = wait_event
 
         try:
-            # 先快速检查队列
-            try:
-                item = self._code_queue.get_nowait()
-                if item.startswith("__ext_ready__:"):
-                    # 收到就绪通知，继续等系统码
-                    pass
-                else:
-                    self._pending.pop(external_code, None)
-                    logger.info(f"[Upbot] 已获取系统码 (即时): {item}")
-                    return item
-            except asyncio.QueueEmpty:
-                pass
+            # 等待消息推送，最多 120 秒
+            done, _ = await asyncio.wait(
+                [asyncio.create_task(wait_event.wait())],
+                timeout=120.0,
+            )
+            self._ready_events.pop(external_code, None)
 
-            # 等待（消息推送或数据库轮询）
-            for _ in range(60):  # 最多等 120 秒
-                done, _ = await asyncio.wait(
-                    [asyncio.create_task(wait_event.wait())],
-                    timeout=2.0,
-                )
-                if done:
-                    break
-
-                # 每 2 秒检查一次队列
-                try:
-                    item = self._code_queue.get_nowait()
-                    if item.startswith("__ext_ready__:"):
-                        pass  # 就绪通知，继续等系统码
-                    else:
-                        self._pending.pop(external_code, None)
-                        logger.info(f"[Upbot] 已获取系统码: {item}")
-                        return item
-                except asyncio.QueueEmpty:
-                    pass
-
-                # 数据库轮询：查 external_code_mapping
-                system_code = await self._poll_db_mapping(external_code)
-                if system_code:
-                    self._pending.pop(external_code, None)
-                    logger.info(f"[Upbot] 通过数据库轮询获取系统码: {system_code}")
-                    return system_code
-
-            # 最后再检查一次队列
-            try:
-                item = self._code_queue.get_nowait()
-                if not item.startswith("__ext_ready__:"):
-                    self._pending.pop(external_code, None)
-                    return item
-            except asyncio.QueueEmpty:
-                pass
-
-            self._pending.pop(external_code, None)
-            logger.warning(f"[Upbot] 等待系统码超时 (external_code={external_code})")
-            return None
-
-        except asyncio.TimeoutError:
-            self._pending.pop(external_code, None)
-            logger.warning("[Upbot] 等待系统码超时 (120s)")
-            return None
-
-    async def _poll_db_mapping(self, external_code: str) -> Optional[str]:
-        """从 CockroachDB 轮询 external_code_mapping 表。"""
-        try:
-            import asyncpg
-            if not settings.COCKROACHDB_URL:
-                return None
-            conn = await asyncpg.connect(settings.COCKROACHDB_URL, statement_cache_size=0)
-            try:
-                row = await conn.fetchrow(
-                    "SELECT system_code FROM external_code_mapping WHERE external_code = $1",
-                    external_code,
-                )
-                if row:
-                    return row["system_code"]
-            finally:
-                await conn.close()
+            if done:
+                logger.info(f"[Upbot] idx_bot 已确认外部文件就绪: {external_code}")
+                return True
+            else:
+                logger.warning(f"[Upbot] 等待 idx_bot 确认超时 (external_code={external_code})")
+                return False
         except Exception:
-            pass
-        return None
+            self._ready_events.pop(external_code, None)
+            return False

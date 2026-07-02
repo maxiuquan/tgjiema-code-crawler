@@ -39,9 +39,6 @@ class Settings(BaseSettings):
     # ── 文件码前缀（与主系统一致） ───────────────────────
     FILE_CODE_PREFIX: str = "tgwenjian"
 
-    # ── CockroachDB ─────────────────────────────────────
-    COCKROACHDB_URL: str = ""
-
     # ── 本地存储 ────────────────────────────────────────
     SQLITE_DB_PATH: str = "codes.db"
     EXPORT_DIR: str = "exports"

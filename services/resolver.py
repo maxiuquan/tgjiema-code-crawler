@@ -1,5 +1,6 @@
-"""Resolver — 向外部机器人查询文件码 → 通过 up_bot 存入主系统 → 写映射
-核心流程: 发码给外部 Bot → 收集返回文件 → up_bot 上传 → idx_bot 生成系统码 → 写外部码映射
+"""Resolver — 向外部机器人查询文件码 → 通过 up_bot 上传到主系统
+核心流程: 发码给外部 Bot → 收集返回文件 → up_bot 上传 → 等待 idx_bot 确认 → 标记已解析
+采集器作为普通用户，全程走主系统 up_bot，不直连主系统数据库。
 """
 
 import asyncio
@@ -7,7 +8,6 @@ import re
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
-import asyncpg
 from loguru import logger
 from telethon import TelegramClient, events
 from telethon.errors import (
@@ -33,13 +33,11 @@ class CodeResolver:
         self.client = client
         self.storage = storage
         self._running = False
-        self._db_pool: Optional[asyncpg.Pool] = None
         self._handler_registered = False
         self._bot_exchange: dict[str, dict] = {}
         self._media_buffers: dict[str, dict] = {}
         self._cache_locks: dict[str, asyncio.Lock] = {}
         self._upbot: object = None  # UpbotUploader, 延迟初始化
-        self._mapper: object = None  # CodeMapper, 延迟初始化
 
     def _init_upbot(self):
         """延迟初始化 UpbotUploader"""
@@ -50,50 +48,7 @@ class CodeResolver:
             self._upbot = UpbotUploader(self.client)
             logger.info("[Resolver] UpbotUploader 已就绪")
 
-    def _init_mapper(self):
-        """延迟初始化 CodeMapper"""
-        if self._mapper is not None:
-            return
-        if self._db_pool and not getattr(self._db_pool, "_closed", False):
-            from services.code_mapper import CodeMapper
-            self._mapper = CodeMapper(self._db_pool)
-
-    # ─── CockroachDB ─────────────────────────────────────
-
-    async def _init_db_pool(self) -> bool:
-        if self._db_pool:
-            return True
-        if not settings.COCKROACHDB_URL:
-            logger.warning("[Resolver] COCKROACHDB_URL 未配置，解析后不会写入主数据库")
-            return False
-        try:
-            self._db_pool = await asyncpg.create_pool(
-                settings.COCKROACHDB_URL,
-                min_size=1,
-                max_size=2,  # RU 优化：从 3 降到 2
-                statement_cache_size=0,
-            )
-            logger.info("[Resolver] 已连接 CockroachDB")
-
-            # 初始化映射表
-            from services.code_mapper import CodeMapper
-            mapper = CodeMapper(self._db_pool)
-            await mapper.init_tables()
-
-            return True
-        except Exception as e:
-            logger.error(f"[Resolver] 连接 CockroachDB 失败: {e}")
-            return False
-
-    @property
-    def db_pool(self) -> Optional[asyncpg.Pool]:
-        """暴露连接池供外部复用（如 CockroachSync），避免创建多个独立连接池。"""
-        return self._db_pool
-
     async def close(self):
-        if self._db_pool:
-            await self._db_pool.close()
-            self._db_pool = None
         for bot in list(self._bot_exchange.keys()):
             self._cleanup_exchange(bot)
 
@@ -294,13 +249,11 @@ class CodeResolver:
                         current_range = tuple(all_nums)
                         prev_range = exchange.get("_last_button_range")
                         if current_range != prev_range:
-                            # 按钮范围已变化（扩展或移位），在新范围内继续
                             exchange["_last_button_range"] = current_range
                             if target > all_nums[-1]:
                                 exchange["_last_page_num"] = None
                                 target = 2 if 2 in all_nums else all_nums[1] if len(all_nums) > 1 else all_nums[0]
                         else:
-                            # 范围未变化，fallthrough 到 Phase 3/4 尝试其他按钮类型
                             break
                 for col_idx, t, n in numbers:
                     if n == target:
@@ -417,13 +370,11 @@ class CodeResolver:
 
         self._register_handlers()
         self._init_upbot()
-        db_ok = await self._init_db_pool()
-        self._init_mapper()
 
         resolved_count = 0
 
         for code_row in codes:
-            ok = await self._resolve_one(code_row, db_ok)
+            ok = await self._resolve_one(code_row)
             if ok:
                 resolved_count += 1
             await asyncio.sleep(settings.RESOLVE_DELAY_BETWEEN_CODES)
@@ -432,7 +383,7 @@ class CodeResolver:
 
     # ─── 解析单个码 ──────────────────────────────────────
 
-    async def _resolve_one(self, code_row: dict, db_ok: bool) -> bool:
+    async def _resolve_one(self, code_row: dict) -> bool:
         code = code_row["code"]
         bot_username = code_row.get("bot_username", "")
         code_id = code_row["id"]
@@ -463,22 +414,11 @@ class CodeResolver:
             logger.debug(f"[Resolver] @{bot_username} 正在被处理中，跳过重复")
             return False
 
-        # ── 检查是否已有映射（L1: 本地 SQLite → L2: CRDB）──
-        if db_ok:
-            if self._mapper:
-                # L1: 本地 SQLite 缓存
-                if self.storage.is_code_mapped(code):
-                    logger.debug(f"[Resolver] 文件码 {code} 本地缓存命中，跳过")
-                    self.storage.mark_resolved(code_id=code_id)
-                    return True
-
-                # L2: CRDB
-                already = await self._mapper.has_mapping(code)
-                if already:
-                    logger.info(f"[Resolver] 文件码 {code} 已有映射（CRDB），标记已解析并跳过")
-                    self.storage.mark_code_mapped(code)
-                    self.storage.mark_resolved(code_id=code_id)
-                    return True
+        # ── 检查是否已有映射（本地 SQLite 缓存）──
+        if self.storage.is_code_mapped(code):
+            logger.debug(f"[Resolver] 文件码 {code} 本地缓存命中，跳过")
+            self.storage.mark_resolved(code_id=code_id)
+            return True
 
         # ─── 获取外部机器人实体 ───
         try:
@@ -521,7 +461,6 @@ class CodeResolver:
         }
 
         # ─── 发送码到外部机器人 ───
-        # 检查冷却期：如果该机器人刚被限速，先等待冷却
         cooldown = self.storage.get_bot_cooldown(bot_username)
         if cooldown > 0:
             logger.info(
@@ -589,35 +528,31 @@ class CodeResolver:
         logger.info(f"[Resolver] @{bot_username} 返回了 {len(media_events)} 个文件")
 
         # ============================================================
-        # ★ 核心改动：通过 up_bot 上传文件到主系统，获取系统码，写映射
+        # ★ 通过 up_bot 上传文件到主系统，等待 idx_bot 确认
         # ============================================================
-        system_code: Optional[str] = None
 
         if self._upbot:
-            system_code = await self._upbot.upload_files(media_events, external_code=code)
+            success = await self._upbot.upload_files(media_events, external_code=code)
+        else:
+            logger.warning("[Resolver] UpbotUploader 未初始化，无法上传")
+            self.storage.mark_resolve_failed(code_id, "upbot_not_available")
+            self._cleanup_exchange(bot_username_lower)
+            return False
 
-        if system_code and self._mapper:
-            await self._mapper.set_mapping(
-                external_code=code,
-                system_code=system_code,
-                bot_username=bot_username,
-            )
+        if success:
             logger.info(
-                f"[Resolver] 文件码解析完成: {code} → 系统码 {system_code} "
-                f"(通过 up_bot, 映射已写入 external_code_mapping)"
+                f"[Resolver] 文件码解析完成: {code} → 已上传至主系统, idx_bot 已确认"
             )
             self.storage.mark_code_mapped(code)
             self.storage.mark_resolved(code_id=code_id)
             self._cleanup_exchange(bot_username_lower)
             return True
 
-        # ─── 回退：up_bot 不可用时记录失败 ───
-        if not system_code:
-            logger.warning(f"[Resolver] 未获取到系统码，文件码 {code} 标记为失败")
-            self.storage.mark_resolve_failed(code_id, "no_system_code_from_upbot")
-
+        # ─── 上传失败 ───
+        logger.warning(f"[Resolver] 上传失败，文件码 {code} 标记为失败")
+        self.storage.mark_resolve_failed(code_id, "upload_failed")
         self._cleanup_exchange(bot_username_lower)
-        return bool(system_code)
+        return False
 
     # ─── 初始 settle ──
 
@@ -705,7 +640,6 @@ class CodeResolver:
 
             row, col = btn_pos
 
-            # 检查消息编辑导致的按钮变化
             exchange = self._bot_exchange.get(bot_username)
             if exchange and exchange.get("_board_version", 0) != board_before:
                 logger.debug(f"[Resolver] @{bot_username} 按钮已更新，重新评估")
@@ -718,7 +652,6 @@ class CodeResolver:
                 exchange.pop("text_responses", None)
                 await asyncio.sleep(rate_wait)
 
-            # 自适应点击间隔
             exchange = self._bot_exchange.get(bot_username)
             if exchange:
                 min_interval = exchange.get("_min_click_interval", 0)
@@ -806,8 +739,6 @@ class CodeResolver:
         cycle = 0
         self._register_handlers()
         self._init_upbot()
-        await self._init_db_pool()
-        self._init_mapper()
 
         logger.info(f"[Resolver] 启动持续解析模式，间隔 {settings.RESOLVE_INTERVAL_SECONDS}s")
 
